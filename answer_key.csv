@@ -1,0 +1,11 @@
+mcq_no,selected_option,selected_label,computed_value,notes
+1,C,180,144.0,Nearest option distance=36.0 days
+2,D,Standard,Standard,Match mode=exact
+3,B,wrong_size,wrong_size,Match mode=exact
+4,C,email_campaign,email_campaign (0.004458),Match mode=exact
+5,C,39%,38.66349,Nearest option distance=0.33651 percentage points
+6,A,55+,55+,Match mode=exact
+7,C,East,East,Selected top reconstructed region from orders + order_items + geography using net line revenue = quantity * unit_price.
+8,A,credit_card,credit_card,Match mode=exact
+9,A,S,S (0.05650000),Exact formula from brief preserved
+10,C,6,6 (24446.654401),Installments match distance=0.0
