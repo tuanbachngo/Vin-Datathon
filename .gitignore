@@ -1,0 +1,14 @@
+.venv/
+.claude/
+.vscode/
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+
+# Local data drops can get large; keep them out of git by default.
+data/
+outputs/
+submissions/
