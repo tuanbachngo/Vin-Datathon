@@ -35,3 +35,4 @@ jupyter lab
 - `outputs/`: charts, exports, and intermediate artifacts
 - `submissions/`: generated submission files
 - `data.ipynb`: starter notebook for EDA and modeling
+- `archive/sql_mcq/`: archived SQL MCQ materials restored from the original repository
