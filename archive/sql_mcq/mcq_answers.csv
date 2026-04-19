@@ -1,11 +1,11 @@
 mcq_no,question_short,computed_value,selected_option,selected_label,notes
-1,Median inter-order gap,144.0,C,180,Nearest option distance=36.0 days
-2,Top segment by gross margin ratio,Standard,D,Standard,Match mode=exact
-3,Most common Streetwear return reason,wrong_size,B,wrong_size,Match mode=exact
-4,Lowest avg bounce rate source,email_campaign (0.004458),C,email_campaign,Match mode=exact
-5,Pct order_items with promo_id,38.66349,C,39%,Nearest option distance=0.33651 percentage points
-6,Age group with highest avg orders/customer,55+,A,55+,Match mode=exact
-7,Region with highest reconstructed revenue,East,C,East,Selected top reconstructed region from orders + order_items + geography using net line revenue = quantity * unit_price.
-8,Most used payment method for cancelled orders,credit_card,A,credit_card,Match mode=exact
-9,Highest return rate by stated formula,S (0.05650000),A,S,Exact formula from brief preserved
-10,Installment plan with highest avg payment,6 (24446.654401),C,6,Installments match distance=0.0
+1,Median inter-order gap,144.0,C,180,Gia tri tinh duoc la 144.0 ngay; dap an gan nhat trong bo lua chon la 180.
+2,Top segment by gross margin ratio,Standard,D,Standard,Match exact from grouped average margin ratio.
+3,Most common Streetwear return reason,wrong_size,B,wrong_size,Match exact from return counts after joining returns to products.
+4,Lowest avg bounce rate source,0.004458,C,email_campaign,Top source is email_campaign with average bounce_rate 0.004458.
+5,Pct order_items with promo_id,38.663493,C,39%,"Gia tri tinh duoc la 38.663493%, gan nhat voi 39%."
+6,Age group with highest avg orders/customer,55+,A,55+,Computed as total orders divided by number of customers in each non-null age group.
+7,Region with highest reconstructed revenue,East,C,East,"sales.csv khong co region, nen doanh thu vung duoc tai dung tu orders + order_items + geography; East dung dau cho ca gross va net."
+8,Most used payment method for cancelled orders,credit_card,A,credit_card,Match exact from cancelled order counts.
+9,Highest return rate by size,0.056515,A,S,Top size is S with return-rate 0.056515 using row-count formula from the brief.
+10,Installment plan with highest avg payment,24446.654403,C,6,Highest average payment_value belongs to installments=6.
