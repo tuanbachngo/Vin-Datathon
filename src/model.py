@@ -1,5 +1,10 @@
 """Boosted tree forecasters on log(Revenue)."""
 from __future__ import annotations
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
+
 import numpy as np
 import pandas as pd
 from sklearn.compose import TransformedTargetRegressor
@@ -14,8 +19,13 @@ try:
 except ImportError:  # pragma: no cover - optional dependency handled at runtime
     LGBMRegressor = None
 
-from src.features import build_feature_matrix
-from src.aux_features import (
+try:
+    from xgboost import XGBRegressor
+except ImportError:  # pragma: no cover - optional dependency handled at runtime
+    XGBRegressor = None
+
+from features import build_feature_matrix
+from aux_features import (
     aux_feature_groups,
     build_aux_daily,
     build_aux_feature_matrix,
@@ -69,6 +79,22 @@ LIGHTGBM_AUX_PARAMS = {
     "reg_lambda": 1.0,
     "n_jobs": 1,
     "verbosity": -1,
+}
+
+XGBOOST_AUX_PARAMS = {
+    "objective": "reg:squarederror",
+    "learning_rate": 0.03,
+    "n_estimators": 700,
+    "max_depth": 6,
+    "min_child_weight": 4.0,
+    "subsample": 0.9,
+    "colsample_bytree": 0.85,
+    "gamma": 0.0,
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0,
+    "tree_method": "hist",
+    "n_jobs": 1,
+    "verbosity": 0,
 }
 
 # Selected from outputs/aux_feature_importance_lgbm.csv. These are generated
@@ -314,6 +340,55 @@ def train_lightgbm_aux(
 
 
 def predict_lightgbm_aux(
+    model: object,
+    val_dates: pd.Series,
+    sales_train: pd.DataFrame,
+    as_of: pd.Timestamp,
+    feature_order: list[str],
+    *,
+    selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+) -> np.ndarray:
+    X = _align_aux_prediction_matrix(
+        val_dates,
+        sales_train,
+        as_of,
+        feature_order,
+        selected_aux_features=selected_aux_features,
+    )
+    return np.exp(model.predict(X))
+
+
+def train_xgboost_aux(
+    sales_train: pd.DataFrame,
+    as_of: pd.Timestamp,
+    *,
+    params: dict[str, float | int | str] | None = None,
+    selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+    random_state: int = 42,
+) -> tuple[object, list[str]]:
+    if XGBRegressor is None:
+        raise ImportError(
+            "xgboost is not installed. Run `.venv\\Scripts\\python.exe -m pip install xgboost`."
+        )
+    X = _aux_matrix(
+        sales_train.Date,
+        sales_train,
+        as_of,
+        selected_aux_features=selected_aux_features,
+    )
+    y = np.log(sales_train.Revenue.values)
+    model_params = dict(XGBOOST_AUX_PARAMS)
+    if params is not None:
+        model_params.update(params)
+    model = XGBRegressor(
+        **model_params,
+        random_state=random_state,
+    )
+    model.fit(X, y)
+    return model, list(X.columns)
+
+
+def predict_xgboost_aux(
     model: object,
     val_dates: pd.Series,
     sales_train: pd.DataFrame,

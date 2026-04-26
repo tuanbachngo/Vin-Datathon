@@ -13,11 +13,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Vietnamese Lunar New Year (Tet) dates — hand-curated for all train+test years.
-# Source: standard Vietnamese calendar. Lunar dates must be precomputed since
-# Tet drives the Jan/Feb trough and cannot be derived from Gregorian calendar.
-# ---------------------------------------------------------------------------
 TET_DATES = {
     2012: "2012-01-23", 2013: "2013-02-10", 2014: "2014-01-31",
     2015: "2015-02-19", 2016: "2016-02-08", 2017: "2017-01-28",
@@ -240,17 +235,7 @@ def build_feature_matrix(
     sales: pd.DataFrame,
     as_of: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Build leakage-safe features for `target_dates` using only rows of
-    `sales` with Date <= as_of.
 
-    Parameters
-    ----------
-    target_dates : dates for which features are needed (train rows OR val rows).
-        For train rows, `as_of` should equal max(target_dates).
-        For val rows, `as_of` must be strictly < min(val_dates).
-    sales : full sales dataframe (Date, Revenue, COGS). Only rows <= as_of used.
-    as_of : the temporal cut-off. Any feature that peeks past this is leakage.
-    """
     assert sales.Date.max() >= as_of, "as_of past sales history"
     sales_masked = sales[sales.Date <= as_of]
 

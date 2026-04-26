@@ -1,10 +1,3 @@
-"""Leakage-safe features derived from non-sales tables.
-
-The auxiliary tables stop at 2022-12-31, so their raw future values are not
-available for the 2023-2024 forecast horizon. This module converts them into
-date-based historical priors: seasonal means, calendar-year references, and
-long lags that can be computed for train, validation, and test in the same way.
-"""
 from __future__ import annotations
 
 from functools import lru_cache
