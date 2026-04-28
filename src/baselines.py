@@ -56,3 +56,51 @@ def seasonal_naive_growth_adjusted(
     ratio = recent / prior if prior > 0 else 1.0
     preds = _calendar_year_back(target_dates, s, years=1) * ratio
     return preds
+
+
+def _seasonal_lookup_level_adjusted(
+    target_dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
+) -> np.ndarray:
+    hist = sales[sales.Date <= as_of].copy()
+    if hist.empty:
+        return np.full(len(target_dates), np.nan, dtype=float)
+
+    hist["month"] = hist.Date.dt.month
+    hist["dow"] = hist.Date.dt.dayofweek
+    recent_mask = hist.Date.dt.year >= 2019
+    base = hist.loc[recent_mask].copy() if recent_mask.sum() > 300 else hist.copy()
+
+    month_mean = base.groupby("month").Revenue.mean()
+    month_dow_mean = base.groupby(["month", "dow"]).Revenue.mean()
+
+    last_year_mean = hist.loc[hist.Date > (as_of - pd.Timedelta(days=365)), "Revenue"].mean()
+    lookup_mean = base["Revenue"].mean()
+    level_ratio = (last_year_mean / lookup_mean) if lookup_mean > 0 else 1.0
+
+    dates = pd.to_datetime(target_dates)
+    out = pd.DataFrame({"Date": dates})
+    out["month"] = out.Date.dt.month
+    out["dow"] = out.Date.dt.dayofweek
+    out["prediction"] = out.apply(
+        lambda row: month_dow_mean.get((row.month, row.dow), np.nan), axis=1
+    )
+    out["prediction"] = out["prediction"].fillna(out["month"].map(month_mean))
+    out["prediction"] = out["prediction"] * level_ratio
+    fallback = float(last_year_mean) if np.isfinite(last_year_mean) else float(hist["Revenue"].mean())
+    out["prediction"] = out["prediction"].fillna(fallback)
+    return out["prediction"].to_numpy(dtype=float)
+
+
+def seasonal_residual_baseline(
+    target_dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
+) -> np.ndarray:
+    mean_2y = seasonal_naive_mean_2y(target_dates, sales, as_of)
+    lookup = _seasonal_lookup_level_adjusted(target_dates, sales, as_of)
+
+    preds = np.asarray(mean_2y, dtype=float)
+    preds = np.where(np.isfinite(preds), preds, lookup)
+    preds = np.where(np.isfinite(preds) & (preds > 0), preds, np.nan)
+    if np.isnan(preds).any():
+        safe_fill = np.nanmedian(lookup) if np.isfinite(lookup).any() else 1.0
+        preds = np.where(np.isnan(preds), safe_fill, preds)
+    return preds

@@ -1,6 +1,7 @@
 """XGBoost tuning and walk-forward prediction helpers."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -34,6 +35,8 @@ def collect_xgboost_oof_predictions(
     folds: list[Fold] | None = None,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
     drop_lag_features: bool = False,
+    target_mode: str = "direct",
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = None,
     random_state: int = 42,
 ) -> pd.DataFrame:
     folds = default_folds() if folds is None else folds
@@ -48,6 +51,8 @@ def collect_xgboost_oof_predictions(
             params=params,
             selected_aux_features=selected_aux_features,
             drop_lag_features=drop_lag_features,
+            target_mode=target_mode,
+            baseline_fn=baseline_fn,
             random_state=random_state,
         )
         pred = predict_xgboost_aux(
@@ -57,6 +62,9 @@ def collect_xgboost_oof_predictions(
             fold.train_end,
             feature_order,
             selected_aux_features=selected_aux_features,
+            drop_lag_features=drop_lag_features,
+            target_mode=target_mode,
+            baseline_fn=baseline_fn,
         )
         rows.append(
             pd.DataFrame(
@@ -80,6 +88,8 @@ def tune_xgboost_hyperparameters(
     folds: list[Fold] | None = None,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
     drop_lag_features: bool = False,
+    target_mode: str = "direct",
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = None,
     random_state: int = 42,
 ) -> XGBoostTuningResult:
     if optuna is None:
@@ -120,6 +130,8 @@ def tune_xgboost_hyperparameters(
                 params=trial_params,
                 selected_aux_features=selected_aux_features,
                 drop_lag_features=drop_lag_features,
+                target_mode=target_mode,
+                baseline_fn=baseline_fn,
                 random_state=random_state,
             )
             pred = predict_xgboost_aux(
@@ -129,6 +141,9 @@ def tune_xgboost_hyperparameters(
                 fold.train_end,
                 feature_order,
                 selected_aux_features=selected_aux_features,
+                drop_lag_features=drop_lag_features,
+                target_mode=target_mode,
+                baseline_fn=baseline_fn,
             )
             fold_metrics = metrics(val.Revenue.to_numpy(), pred)
             fold_rmses.append(fold_metrics["RMSE"])

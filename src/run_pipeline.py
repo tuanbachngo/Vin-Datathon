@@ -34,15 +34,47 @@ ROOT = Path(__file__).parent.parent
 DATA_DIR = ROOT / "data"
 OUT_DIR = ROOT / "outputs"
 SUB_DIR = ROOT / "submissions"
-XGB_PARAMS_PATH = OUT_DIR / "xgboost_best_params.json"
-XGB_TRIALS_PATH = OUT_DIR / "xgboost_optuna_trials.csv"
-XGB_OOF_PATH = OUT_DIR / "xgboost_oof_predictions.csv"
-XGB_OOF_CAL_PATH = OUT_DIR / "xgboost_oof_calibrated.csv"
-XGB_CAL_CURVE_PATH = OUT_DIR / "xgboost_calibration_curve.csv"
-XGB_CAL_SUMMARY_PATH = OUT_DIR / "xgboost_calibration_summary.json"
 
 OUT_DIR.mkdir(exist_ok=True)
 SUB_DIR.mkdir(exist_ok=True)
+
+
+def xgb_artifact_paths(prefix: str) -> dict[str, Path]:
+    return {
+        "params": OUT_DIR / f"{prefix}_best_params.json",
+        "trials": OUT_DIR / f"{prefix}_optuna_trials.csv",
+        "oof": OUT_DIR / f"{prefix}_oof_predictions.csv",
+        "oof_calibrated": OUT_DIR / f"{prefix}_oof_calibrated.csv",
+        "calibration_curve": OUT_DIR / f"{prefix}_calibration_curve.csv",
+        "calibration_summary": OUT_DIR / f"{prefix}_calibration_summary.json",
+        "cv": OUT_DIR / f"{prefix}_cv_results.csv",
+    }
+
+
+def xgb_runtime_config(no_lag: bool, no_lag_residual: bool) -> dict[str, str | bool]:
+    if no_lag_residual:
+        return {
+            "artifact_prefix": "xgboost_no_lag_residual",
+            "model_name": "xgboost_top_aux_no_lag_residual",
+            "submission_prefix": "submission_xgboost_top_aux_no_lag_residual",
+            "drop_lag_features": True,
+            "target_mode": "residual",
+        }
+    if no_lag:
+        return {
+            "artifact_prefix": "xgboost_no_lag",
+            "model_name": "xgboost_top_aux_no_lag",
+            "submission_prefix": "submission_xgboost_top_aux_no_lag",
+            "drop_lag_features": True,
+            "target_mode": "direct",
+        }
+    return {
+        "artifact_prefix": "xgboost",
+        "model_name": "xgboost_top_aux_log_target",
+        "submission_prefix": "submission_xgboost_top_aux",
+        "drop_lag_features": False,
+        "target_mode": "direct",
+    }
 
 
 def load_sales() -> pd.DataFrame:
@@ -58,7 +90,7 @@ def _json_ready_dict(payload: dict[str, float | int | str]) -> dict[str, float |
 
 
 def load_xgboost_params(
-    path: Path = XGB_PARAMS_PATH,
+    path: Path,
 ) -> dict[str, float | int | str] | None:
     if not path.exists():
         return None
@@ -68,7 +100,7 @@ def load_xgboost_params(
 
 def save_xgboost_params(
     params: dict[str, float | int | str],
-    path: Path = XGB_PARAMS_PATH,
+    path: Path,
 ) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(_json_ready_dict(params), handle, indent=2, ensure_ascii=True)
@@ -76,7 +108,7 @@ def save_xgboost_params(
 
 def save_calibration_summary(
     summary: dict[str, float],
-    path: Path = XGB_CAL_SUMMARY_PATH,
+    path: Path,
 ) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(_json_ready_dict(summary), handle, indent=2, ensure_ascii=True)
@@ -88,6 +120,9 @@ def evaluate_cv(
     xgb_params: dict[str, float | int | str] | None = None,
     xgb_oof: pd.DataFrame | None = None,
     xgb_calibrator: RevenueCalibrator | None = None,
+    xgb_drop_lag_features: bool = False,
+    xgb_target_mode: str = "direct",
+    xgb_model_name: str = "xgboost_top_aux_log_target",
 ) -> pd.DataFrame:
     rows: list[dict[str, float | str]] = []
     xgb_by_fold = None
@@ -146,10 +181,20 @@ def evaluate_cv(
 
         if xgb_by_fold is None:
             xgb_model, xgb_feature_order = train_xgboost_aux(
-                train, as_of=as_of, params=xgb_params
+                train,
+                as_of=as_of,
+                params=xgb_params,
+                drop_lag_features=xgb_drop_lag_features,
+                target_mode=xgb_target_mode,
             )
             p_xgb = predict_xgboost_aux(
-                xgb_model, val.Date, sales, as_of, xgb_feature_order
+                xgb_model,
+                val.Date,
+                sales,
+                as_of,
+                xgb_feature_order,
+                drop_lag_features=xgb_drop_lag_features,
+                target_mode=xgb_target_mode,
             )
         else:
             fold_xgb = xgb_by_fold.get(fold.name)
@@ -169,7 +214,7 @@ def evaluate_cv(
             ("lightgbm_log_target", p_lgbm),
             ("lightgbm_top_aux_log_target", p_lgbm_aux),
             ("lightgbm_all_aux_log_target", p_lgbm_all_aux),
-            ("xgboost_top_aux_log_target", p_xgb),
+            (xgb_model_name, p_xgb),
             ("mlp_deep_learning", p_mlp),
         ]
         if p_hist is not None:
@@ -185,7 +230,7 @@ def evaluate_cv(
             rows.append(
                 {
                     "fold": fold.name,
-                    "model": "xgboost_top_aux_calibrated",
+                    "model": f"{xgb_model_name}_calibrated",
                     **m,
                 }
             )
@@ -198,6 +243,10 @@ def fit_and_submit(
     *,
     xgb_params: dict[str, float | int | str] | None = None,
     xgb_calibrator: RevenueCalibrator | None = None,
+    xgb_drop_lag_features: bool = False,
+    xgb_target_mode: str = "direct",
+    xgb_submission_prefix: str = "submission_xgboost_top_aux",
+    write_submission_alias: bool = True,
 ) -> Path:
     sub = pd.read_csv(DATA_DIR / "sample_submission.csv", parse_dates=["Date"])
     as_of = sales.Date.max()
@@ -219,7 +268,11 @@ def fit_and_submit(
         sales, as_of=as_of, selected_aux_features=None
     )
     xgb_model, xgb_feature_order = train_xgboost_aux(
-        sales, as_of=as_of, params=xgb_params
+        sales,
+        as_of=as_of,
+        params=xgb_params,
+        drop_lag_features=xgb_drop_lag_features,
+        target_mode=xgb_target_mode,
     )
     mlp_model, mlp_feature_order = train_mlp(sales, as_of=as_of)
 
@@ -248,6 +301,8 @@ def fit_and_submit(
         sales,
         as_of,
         xgb_feature_order,
+        drop_lag_features=xgb_drop_lag_features,
+        target_mode=xgb_target_mode,
     )
     pred_xgb_calibrated = (
         xgb_calibrator.predict(pred_xgb) if xgb_calibrator is not None else pred_xgb
@@ -279,20 +334,22 @@ def fit_and_submit(
 
     out_xgb = sub.copy()
     out_xgb["Revenue"] = pred_xgb
-    out_xgb.to_csv(SUB_DIR / "submission_xgboost_top_aux_raw.csv", index=False)
+    out_xgb.to_csv(SUB_DIR / f"{xgb_submission_prefix}_raw.csv", index=False)
 
     out_xgb_calibrated = sub.copy()
     out_xgb_calibrated["Revenue"] = pred_xgb_calibrated
     out_xgb_calibrated.to_csv(
-        SUB_DIR / "submission_xgboost_top_aux_calibrated.csv", index=False
+        SUB_DIR / f"{xgb_submission_prefix}_calibrated.csv", index=False
     )
 
     out_mlp = sub.copy()
     out_mlp["Revenue"] = pred_mlp
     out_mlp.to_csv(SUB_DIR / "submission_mlp_v4.csv", index=False)
 
-    out_xgb_calibrated.to_csv(SUB_DIR / "submission.csv", index=False)
-    return SUB_DIR / "submission.csv"
+    if write_submission_alias:
+        out_xgb_calibrated.to_csv(SUB_DIR / "submission.csv", index=False)
+        return SUB_DIR / "submission.csv"
+    return SUB_DIR / f"{xgb_submission_prefix}_calibrated.csv"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -310,6 +367,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=25,
         help="Number of Optuna trials when --tune-xgboost is enabled.",
     )
+    parser.add_argument(
+        "--xgb-no-lag",
+        action="store_true",
+        help="Use the no-lag XGBoost feature space while keeping the direct log-revenue target.",
+    )
+    parser.add_argument(
+        "--xgb-no-lag-residual",
+        action="store_true",
+        help="Use the no-lag XGBoost feature space and train on residuals over a seasonal baseline.",
+    )
     return parser
 
 
@@ -321,31 +388,46 @@ def main() -> None:
         f"{sales.Date.min().date()} -> {sales.Date.max().date()}"
     )
 
-    xgb_params = load_xgboost_params()
+    xgb_config = xgb_runtime_config(args.xgb_no_lag, args.xgb_no_lag_residual)
+    xgb_paths = xgb_artifact_paths(str(xgb_config["artifact_prefix"]))
+    xgb_params = load_xgboost_params(xgb_paths["params"])
     xgb_source = "defaults"
 
     if args.tune_xgboost:
-        print(f"\n=== Optuna tuning XGBoost ({args.xgb_trials} trials) ===")
+        print(
+            "\n=== Optuna tuning XGBoost "
+            f"({xgb_config['artifact_prefix']}, {args.xgb_trials} trials) ==="
+        )
         tuning_result = tune_xgboost_hyperparameters(
-            sales, n_trials=args.xgb_trials
+            sales,
+            n_trials=args.xgb_trials,
+            drop_lag_features=bool(xgb_config["drop_lag_features"]),
+            target_mode=str(xgb_config["target_mode"]),
         )
         xgb_params = tuning_result.best_params
         xgb_source = f"optuna_{args.xgb_trials}_trials"
-        save_xgboost_params(xgb_params)
-        tuning_result.trials.to_csv(XGB_TRIALS_PATH, index=False)
+        save_xgboost_params(xgb_params, xgb_paths["params"])
+        tuning_result.trials.to_csv(xgb_paths["trials"], index=False)
         print(f"Best RMSE: {tuning_result.best_value:.3f}")
-        print(f"Saved params to {XGB_PARAMS_PATH}")
+        print(f"Saved params to {xgb_paths['params']}")
     elif xgb_params is not None:
-        xgb_source = XGB_PARAMS_PATH.name
+        xgb_source = xgb_paths["params"].name
 
     print(f"\n=== XGBoost parameter source: {xgb_source} ===")
-    xgb_oof = collect_xgboost_oof_predictions(sales, params=xgb_params)
-    xgb_oof.to_csv(XGB_OOF_PATH, index=False)
+    xgb_oof = collect_xgboost_oof_predictions(
+        sales,
+        params=xgb_params,
+        drop_lag_features=bool(xgb_config["drop_lag_features"]),
+        target_mode=str(xgb_config["target_mode"]),
+    )
+    xgb_oof.to_csv(xgb_paths["oof"], index=False)
 
     calibration_result = fit_revenue_calibrator(xgb_oof)
-    calibration_result.calibrated_oof.to_csv(XGB_OOF_CAL_PATH, index=False)
-    calibration_result.calibrator.to_frame().to_csv(XGB_CAL_CURVE_PATH, index=False)
-    save_calibration_summary(calibration_result.summary)
+    calibration_result.calibrated_oof.to_csv(xgb_paths["oof_calibrated"], index=False)
+    calibration_result.calibrator.to_frame().to_csv(
+        xgb_paths["calibration_curve"], index=False
+    )
+    save_calibration_summary(calibration_result.summary, xgb_paths["calibration_summary"])
     print(
         "Calibration RMSE (grouped by Date): "
         f"{calibration_result.summary['raw_rmse']:.3f} -> "
@@ -358,18 +440,25 @@ def main() -> None:
         xgb_params=xgb_params,
         xgb_oof=xgb_oof,
         xgb_calibrator=calibration_result.calibrator,
+        xgb_drop_lag_features=bool(xgb_config["drop_lag_features"]),
+        xgb_target_mode=str(xgb_config["target_mode"]),
+        xgb_model_name=str(xgb_config["model_name"]),
     )
     print(cv.round(3).to_string(index=False))
 
     print("\n=== CV summary by model (mean across folds) ===")
     print(cv.groupby("model")[["MAE", "RMSE", "R2", "MAPE"]].mean().round(3))
-    cv.to_csv(OUT_DIR / "cv_results.csv", index=False)
+    cv.to_csv(xgb_paths["cv"], index=False)
 
     print("\n=== Fit on all train, write submission ===")
     path = fit_and_submit(
         sales,
         xgb_params=xgb_params,
         xgb_calibrator=calibration_result.calibrator,
+        xgb_drop_lag_features=bool(xgb_config["drop_lag_features"]),
+        xgb_target_mode=str(xgb_config["target_mode"]),
+        xgb_submission_prefix=str(xgb_config["submission_prefix"]),
+        write_submission_alias=not (args.xgb_no_lag_residual or args.xgb_no_lag),
     )
     print(f"wrote {path}")
 
