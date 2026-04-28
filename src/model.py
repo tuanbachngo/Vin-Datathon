@@ -97,19 +97,29 @@ XGBOOST_AUX_PARAMS = {
     "verbosity": 0,
 }
 
-# Selected from outputs/aux_feature_importance_lgbm.csv. These are generated
-# feature names, not raw source columns.
+# Top auxiliary features selected from XGBoost gain importance averaged across
+# all three CV folds on the current feature set (trend+seasonal + EWMA).
 TOP_AUX_FEATURES = [
-    "aux_conversion_order_per_session_doy_mean",
-    "aux_net_item_sales_doy_mean",
-    "aux_desktop_share_doy_mean",
-    "aux_conversion_order_per_session_month_dow_mean",
+    "aux_unique_customers_trend",
+    "aux_order_count_trend",
+    "aux_sessions_trend",
+    "aux_units_year1",
     "aux_unique_customers_year1",
-    "aux_paid_search_share_doy_mean",
-    "aux_region_share_central_year1",
-    "aux_shipments_doy_mean",
-    "aux_order_count_doy_mean",
-    "aux_shipping_fee_doy_mean",
+    "aux_order_count_year1",
+    "aux_payment_value_trend_month",
+    "aux_refund_amount_trend_month",
+    "aux_conversion_order_per_session_ewm90_548",
+    "aux_avg_promo_discount_value_year2",
+    "aux_cat_share_casual_ewm90_548",
+    "aux_mean_days_of_supply_ewm30_730",
+    "aux_conversion_order_per_session_ewm90_730",
+    "aux_page_views_ewm90_548",
+    "aux_refund_amount_trend_month_dow",
+    "aux_payment_value_year1",
+    "aux_net_item_sales_year1",
+    "aux_sessions_ewm90_548",
+    "aux_page_views_trend",
+    "aux_unique_customers_roll30_548",
 ]
 
 MLP_PARAMS = {

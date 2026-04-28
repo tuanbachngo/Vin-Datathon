@@ -28,6 +28,94 @@ def _mean_or_zero(series: pd.Series) -> pd.Series:
     return series.fillna(0.0)
 
 
+def _fit_trend_seasonal_model(
+    series: pd.Series,
+    recent_years: int = 4,
+) -> dict | None:
+    """Fit linear trend + additive month/dow seasonal model.
+
+    Uses the most recent `recent_years` of the series (or full history if
+    not enough data). Returns None when data is insufficient.
+    """
+    hist = series.dropna()
+    if len(hist) < 60:
+        return None
+
+    as_of = hist.index.max()
+    cutoff = as_of - pd.DateOffset(years=recent_years)
+    hist_fit = hist.loc[cutoff:] if len(hist.loc[cutoff:]) > 90 else hist
+
+    monthly = hist_fit.resample("MS").mean().dropna()
+    if len(monthly) < 6:
+        return None
+
+    origin = monthly.index[0]
+    x = (monthly.index - origin).days.values.astype(float)
+    y = monthly.values.astype(float)
+    slope, intercept = np.polyfit(x, y, 1)
+
+    trend_at_monthly = slope * x + intercept
+    monthly_resid = y - trend_at_monthly
+    month_seasonal = (
+        pd.Series(monthly_resid, index=monthly.index.month)
+        .groupby(level=0)
+        .mean()
+    )
+
+    daily_x = (hist_fit.index - origin).days.values.astype(float)
+    daily_trend = slope * daily_x + intercept
+    daily_resid = hist_fit.values - daily_trend
+    dow_seasonal = (
+        pd.Series(daily_resid, index=hist_fit.index.dayofweek)
+        .groupby(level=0)
+        .mean()
+    )
+
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "origin": origin,
+        "month_seasonal": month_seasonal,
+        "dow_seasonal": dow_seasonal,
+    }
+
+
+def _project_trend_seasonal(
+    model: dict | None,
+    target_dates: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Project values for target_dates from a fitted trend+seasonal model.
+
+    Returns three columns:
+    - trend: pure linear extrapolation
+    - trend_month: trend + monthly seasonal adjustment
+    - trend_month_dow: trend + monthly + day-of-week adjustment
+    """
+    n = len(target_dates)
+    if model is None:
+        return pd.DataFrame({
+            "trend": np.full(n, np.nan),
+            "trend_month": np.full(n, np.nan),
+            "trend_month_dow": np.full(n, np.nan),
+        })
+
+    days = (target_dates - model["origin"]).days.values.astype(float)
+    trend = model["slope"] * days + model["intercept"]
+
+    month_adj = np.array([
+        model["month_seasonal"].get(m, 0.0) for m in target_dates.month
+    ])
+    dow_adj = np.array([
+        model["dow_seasonal"].get(d, 0.0) for d in target_dates.dayofweek
+    ])
+
+    return pd.DataFrame({
+        "trend": trend,
+        "trend_month": trend + month_adj,
+        "trend_month_dow": trend + month_adj + dow_adj,
+    })
+
+
 @lru_cache(maxsize=1)
 def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
     """Build one daily dataframe from all non-sales source tables."""
@@ -365,71 +453,57 @@ def build_aux_feature_matrix(
     *,
     aux_daily: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build leakage-safe priors from auxiliary daily aggregates."""
+    """Build leakage-safe features using trend+seasonal decomposition.
+
+    For each auxiliary column three decomposition features are produced:
+    - ``aux_{col}_trend``           — linear trend projected to target date
+    - ``aux_{col}_trend_month``     — trend + monthly seasonal adjustment
+    - ``aux_{col}_trend_month_dow`` — trend + monthly + day-of-week adjustment
+
+    Plus six lag-based features retained for direct historical evidence:
+    lag548, lag730, year1, year2, roll30_548, roll30_730.
+    """
     if not columns:
         return pd.DataFrame(index=range(len(target_dates)))
 
     aux = build_aux_daily() if aux_daily is None else aux_daily
     dates = pd.to_datetime(target_dates)
-    hist = aux.loc[:as_of].copy()
-    hist_cal = hist.reset_index()
-    hist_cal["year"] = hist_cal.Date.dt.year
-    hist_cal["month"] = hist_cal.Date.dt.month
-    hist_cal["dow"] = hist_cal.Date.dt.dayofweek
-    hist_cal["doy"] = hist_cal.Date.dt.dayofyear
-    hist_cal["week"] = hist_cal.Date.dt.isocalendar().week.astype(int)
+    date_index = pd.DatetimeIndex(dates)
+    hist = aux.loc[:as_of]
 
-    base = hist_cal[hist_cal.year >= 2019]
-    if len(base) < 500:
-        base = hist_cal
-
-    cal = pd.DataFrame({"Date": dates})
-    cal["month"] = cal.Date.dt.month
-    cal["dow"] = cal.Date.dt.dayofweek
-    cal["doy"] = cal.Date.dt.dayofyear
-    cal["week"] = cal.Date.dt.isocalendar().week.astype(int)
-
-    parts: list[pd.Series] = []
+    parts: list[pd.DataFrame] = []
     for col in columns:
-        s = hist[col]
-        month_mean = base.groupby("month")[col].mean()
-        month_dow_mean = base.groupby(["month", "dow"])[col].mean()
-        doy_mean = base.groupby("doy")[col].mean()
-        week_mean = base.groupby("week")[col].mean()
+        if col not in hist.columns:
+            continue
+        s = hist[col].sort_index()
+
+        model = _fit_trend_seasonal_model(s)
+        proj = _project_trend_seasonal(model, date_index)
+        proj.columns = [f"aux_{col}_{c}" for c in proj.columns]
+
         roll30 = s.rolling(30, min_periods=10).mean()
+        ewm30 = s.ewm(span=30, min_periods=10).mean()
+        ewm90 = s.ewm(span=90, min_periods=20).mean()
 
-        month = cal.month.map(month_mean)
-        month_dow = pd.Series(
-            [month_dow_mean.get((m, d), np.nan) for m, d in zip(cal.month, cal.dow)],
-            index=cal.index,
-        ).fillna(month)
-        doy = cal.doy.map(doy_mean)
-        week = cal.week.map(week_mean)
-        lag548 = pd.Series(s.reindex(dates - pd.Timedelta(days=548)).values)
-        lag730 = pd.Series(s.reindex(dates - pd.Timedelta(days=730)).values)
-        year1 = pd.Series(s.reindex(dates - pd.DateOffset(years=1)).values)
-        year2 = pd.Series(s.reindex(dates - pd.DateOffset(years=2)).values)
-        roll30_548 = pd.Series(
-            roll30.reindex(dates - pd.Timedelta(days=548)).values
-        )
-        roll30_730 = pd.Series(
-            roll30.reindex(dates - pd.Timedelta(days=730)).values
-        )
+        lag_df = pd.DataFrame({
+            f"aux_{col}_lag548": s.reindex(dates - pd.Timedelta(days=548)).values,
+            f"aux_{col}_lag730": s.reindex(dates - pd.Timedelta(days=730)).values,
+            f"aux_{col}_year1": s.reindex(dates - pd.DateOffset(years=1)).values,
+            f"aux_{col}_year2": s.reindex(dates - pd.DateOffset(years=2)).values,
+            f"aux_{col}_roll30_548": roll30.reindex(dates - pd.Timedelta(days=548)).values,
+            f"aux_{col}_roll30_730": roll30.reindex(dates - pd.Timedelta(days=730)).values,
+            f"aux_{col}_ewm30_548": ewm30.reindex(dates - pd.Timedelta(days=548)).values,
+            f"aux_{col}_ewm30_730": ewm30.reindex(dates - pd.Timedelta(days=730)).values,
+            f"aux_{col}_ewm90_548": ewm90.reindex(dates - pd.Timedelta(days=548)).values,
+            f"aux_{col}_ewm90_730": ewm90.reindex(dates - pd.Timedelta(days=730)).values,
+        }).reset_index(drop=True)
 
-        for suffix, values in [
-            ("month_mean", month),
-            ("month_dow_mean", month_dow),
-            ("doy_mean", doy),
-            ("week_mean", week),
-            ("lag548", lag548),
-            ("lag730", lag730),
-            ("year1", year1),
-            ("year2", year2),
-            ("roll30_548", roll30_548),
-            ("roll30_730", roll30_730),
-        ]:
-            values = pd.Series(values).reset_index(drop=True)
-            values.name = f"aux_{col}_{suffix}"
-            parts.append(values)
+        # Missingness indicators for point-lag features (non-zero only for early rows)
+        for _lag_suffix in ["lag548", "lag730", "year1", "year2"]:
+            _src = f"aux_{col}_{_lag_suffix}"
+            lag_df[f"{_src}_miss"] = lag_df[_src].isna().astype(np.int8)
+
+        parts.append(proj.reset_index(drop=True))
+        parts.append(lag_df)
 
     return pd.concat(parts, axis=1).reset_index(drop=True)
