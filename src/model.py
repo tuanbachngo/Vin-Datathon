@@ -122,6 +122,12 @@ TOP_AUX_FEATURES = [
     "aux_unique_customers_roll30_548",
 ]
 
+XGB_AUX_NON_LAG_SUFFIXES = (
+    "_trend",
+    "_trend_month",
+    "_trend_month_dow",
+)
+
 MLP_PARAMS = {
     "hidden_layer_sizes": (64, 32),
     "activation": "relu",
@@ -225,6 +231,26 @@ def _align_aux_prediction_matrix(
         if col not in X.columns:
             X[col] = np.nan
     return X[feature_order]
+
+
+def _filter_xgboost_feature_matrix(
+    X: pd.DataFrame,
+    *,
+    drop_lag_features: bool,
+) -> pd.DataFrame:
+    if not drop_lag_features:
+        return X
+
+    keep_columns: list[str] = []
+    for col in X.columns:
+        if col.startswith("aux_"):
+            if col.endswith(XGB_AUX_NON_LAG_SUFFIXES):
+                keep_columns.append(col)
+            continue
+        if col.startswith(("rev_lag_", "log_rev_lag_", "rev_roll", "rev_ewm")):
+            continue
+        keep_columns.append(col)
+    return X[keep_columns]
 
 
 def train_hist_gbm(
@@ -374,6 +400,7 @@ def train_xgboost_aux(
     *,
     params: dict[str, float | int | str] | None = None,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+    drop_lag_features: bool = False,
     random_state: int = 42,
 ) -> tuple[object, list[str]]:
     if XGBRegressor is None:
@@ -386,6 +413,7 @@ def train_xgboost_aux(
         as_of,
         selected_aux_features=selected_aux_features,
     )
+    X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
     y = np.log(sales_train.Revenue.values)
     model_params = dict(XGBOOST_AUX_PARAMS)
     if params is not None:

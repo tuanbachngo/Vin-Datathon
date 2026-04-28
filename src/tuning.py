@@ -33,6 +33,7 @@ def collect_xgboost_oof_predictions(
     params: dict[str, float | int | str] | None = None,
     folds: list[Fold] | None = None,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+    drop_lag_features: bool = False,
     random_state: int = 42,
 ) -> pd.DataFrame:
     folds = default_folds() if folds is None else folds
@@ -46,6 +47,7 @@ def collect_xgboost_oof_predictions(
             as_of=fold.train_end,
             params=params,
             selected_aux_features=selected_aux_features,
+            drop_lag_features=drop_lag_features,
             random_state=random_state,
         )
         pred = predict_xgboost_aux(
@@ -77,6 +79,7 @@ def tune_xgboost_hyperparameters(
     n_trials: int = 25,
     folds: list[Fold] | None = None,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+    drop_lag_features: bool = False,
     random_state: int = 42,
 ) -> XGBoostTuningResult:
     if optuna is None:
@@ -116,6 +119,7 @@ def tune_xgboost_hyperparameters(
                 as_of=fold.train_end,
                 params=trial_params,
                 selected_aux_features=selected_aux_features,
+                drop_lag_features=drop_lag_features,
                 random_state=random_state,
             )
             pred = predict_xgboost_aux(
