@@ -13,11 +13,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Vietnamese Lunar New Year (Tet) dates — hand-curated for all train+test years.
-# Source: standard Vietnamese calendar. Lunar dates must be precomputed since
-# Tet drives the Jan/Feb trough and cannot be derived from Gregorian calendar.
-# ---------------------------------------------------------------------------
 TET_DATES = {
     2012: "2012-01-23", 2013: "2013-02-10", 2014: "2014-01-31",
     2015: "2015-02-19", 2016: "2016-02-08", 2017: "2017-01-28",
@@ -74,13 +69,22 @@ def _calendar_features(dates: pd.Series) -> pd.DataFrame:
     d["is_month_start"] = d.Date.dt.is_month_start.astype(int)
     d["is_month_end"] = d.Date.dt.is_month_end.astype(int)
 
-    # cyclical encodings
+    # cyclical encodings — k=1
     d["month_sin"] = np.sin(2 * np.pi * d.month / 12)
     d["month_cos"] = np.cos(2 * np.pi * d.month / 12)
     d["doy_sin"] = np.sin(2 * np.pi * d.doy / 365.25)
     d["doy_cos"] = np.cos(2 * np.pi * d.doy / 365.25)
     d["dow_sin"] = np.sin(2 * np.pi * d.dow / 7)
     d["dow_cos"] = np.cos(2 * np.pi * d.dow / 7)
+
+    # Fourier harmonics k=2,3 (capture sub-annual seasonality shapes)
+    for _k in [2, 3]:
+        d[f"month_sin_{_k}"] = np.sin(2 * np.pi * _k * d.month / 12)
+        d[f"month_cos_{_k}"] = np.cos(2 * np.pi * _k * d.month / 12)
+        d[f"doy_sin_{_k}"] = np.sin(2 * np.pi * _k * d.doy / 365.25)
+        d[f"doy_cos_{_k}"] = np.cos(2 * np.pi * _k * d.doy / 365.25)
+        d[f"dow_sin_{_k}"] = np.sin(2 * np.pi * _k * d.dow / 7)
+        d[f"dow_cos_{_k}"] = np.cos(2 * np.pi * _k * d.dow / 7)
 
     # Vietnamese fixed-date holidays (+/- 1-day halo)
     for mmdd, name in VN_FIXED_HOLIDAYS:
@@ -103,6 +107,28 @@ def _calendar_features(dates: pd.Series) -> pd.DataFrame:
     d["is_even_year"] = (d.year % 2 == 0).astype(int)
     d["is_aug_even"] = (d.is_even_year & (d.month == 8)).astype(int)
     d["is_aug_odd"] = ((1 - d.is_even_year) & (d.month == 8)).astype(int)
+
+    # Time elapsed features
+    _ORIGIN = pd.Timestamp("2012-07-04")
+    _REGIME_START = pd.Timestamp("2019-01-01")
+    d["days_since_origin"] = (d.Date - _ORIGIN).dt.days
+    d["days_since_regime"] = np.maximum(0, (d.Date - _REGIME_START).dt.days)
+
+    # Holiday / event window features
+    d["tet_pre_2w"] = ((d.days_to_tet >= -14) & (d.days_to_tet < -7)).astype(int)
+    d["tet_pre_1w"] = ((d.days_to_tet >= -7) & (d.days_to_tet < 0)).astype(int)
+    d["tet_post_1w"] = ((d.days_to_tet > 0) & (d.days_to_tet <= 7)).astype(int)
+    d["days_to_month_end"] = d.Date.dt.days_in_month - d.day
+    _qend = d.Date.dt.to_period("Q").dt.to_timestamp(how="E")
+    d["days_to_quarter_end"] = (_qend - d.Date).dt.days
+    d["is_quarter_end_week"] = (d.days_to_quarter_end <= 7).astype(int)
+
+    # Interaction features
+    d["is_q1_recent"] = ((d.quarter == 1) & d.regime_recent.astype(bool)).astype(int)
+    d["is_q2_recent"] = ((d.quarter == 2) & d.regime_recent.astype(bool)).astype(int)
+    d["month_x_even_year"] = d.month * d.is_even_year
+    d["tet_week_x_dow"] = d.is_tet_week * d.dow
+
     return d.drop(columns=["Date"])
 
 
@@ -139,6 +165,22 @@ def _long_lag_features(dates: pd.Series, sales: pd.DataFrame) -> pd.DataFrame:
         out[f"rev_roll{window}_end_730d_ago"] = rolled[window].reindex(
             dates - pd.Timedelta(days=730)
         ).values
+
+    # EWMA at lag-safe anchor points (more weight on recent history than simple rolling)
+    _ewm_cache: dict[int, pd.Series] = {}
+    for span in [14, 30, 90]:
+        _ewm_cache[span] = s.ewm(span=span, min_periods=max(5, span // 4)).mean()
+    for span in [14, 30, 90]:
+        for lag in [365, 548, 730]:
+            out[f"rev_ewm{span}_end_{lag}d_ago"] = _ewm_cache[span].reindex(
+                dates - pd.Timedelta(days=lag)
+            ).values
+
+    # YoY growth ratio using roll30 at each anchor (helps model learn trend direction)
+    for lag_near, lag_far in [(365, 730), (548, 730)]:
+        near = out[f"rev_roll30_end_{lag_near}d_ago"]
+        far = out[f"rev_roll30_end_{lag_far}d_ago"].replace(0, np.nan)
+        out[f"rev_roll30_yoy_ratio_{lag_near}vs{lag_far}"] = near / far
 
     # Blend the annual lag with the fully-safe 2-year lag. Late-horizon rows
     # naturally fall back to lag-730 when lag-365 is unavailable.
@@ -240,17 +282,7 @@ def build_feature_matrix(
     sales: pd.DataFrame,
     as_of: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Build leakage-safe features for `target_dates` using only rows of
-    `sales` with Date <= as_of.
 
-    Parameters
-    ----------
-    target_dates : dates for which features are needed (train rows OR val rows).
-        For train rows, `as_of` should equal max(target_dates).
-        For val rows, `as_of` must be strictly < min(val_dates).
-    sales : full sales dataframe (Date, Revenue, COGS). Only rows <= as_of used.
-    as_of : the temporal cut-off. Any feature that peeks past this is leakage.
-    """
     assert sales.Date.max() >= as_of, "as_of past sales history"
     sales_masked = sales[sales.Date <= as_of]
 

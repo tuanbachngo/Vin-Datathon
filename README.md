@@ -36,3 +36,32 @@ jupyter lab
 - `submissions/`: generated submission files
 - `data.ipynb`: starter notebook for EDA and modeling
 - `archive/sql_mcq/`: archived SQL MCQ materials restored from the original repository
+
+## Forecast Pipeline
+
+Run the end-to-end forecasting script with:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.run_pipeline
+```
+
+This now includes:
+
+- the existing baseline, hist-GBM, GBR, LightGBM, and MLP models
+- an `xgboost` top-aux feature pipeline
+- post-hoc calibration for the `xgboost` submission using out-of-fold predictions
+
+To tune the `xgboost` model with Optuna before generating CV results and submission files:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.run_pipeline --tune-xgboost --xgb-trials 40
+```
+
+Key artifacts:
+
+- `outputs/xgboost_best_params.json`: cached best parameters from Optuna
+- `outputs/xgboost_optuna_trials.csv`: trial-level tuning results
+- `outputs/xgboost_oof_predictions.csv`: raw walk-forward predictions for calibration
+- `outputs/xgboost_oof_calibrated.csv`: calibrated out-of-fold predictions
+- `submissions/submission_xgboost_top_aux_calibrated.csv`: calibrated XGBoost submission
+- `submissions/submission.csv`: alias of the calibrated XGBoost submission
