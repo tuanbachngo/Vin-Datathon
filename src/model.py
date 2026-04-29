@@ -1,6 +1,7 @@
 """Boosted tree forecasters on log(Revenue)."""
 from __future__ import annotations
 import os
+from collections.abc import Callable
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
@@ -24,6 +25,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency handled at runtime
     XGBRegressor = None
 
+from baselines import seasonal_residual_baseline
 from features import build_feature_matrix
 from aux_features import (
     aux_feature_groups,
@@ -253,6 +255,19 @@ def _filter_xgboost_feature_matrix(
     return X[keep_columns]
 
 
+def _baseline_prediction_array(
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
+    dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+) -> np.ndarray:
+    if baseline_fn is None:
+        baseline_fn = seasonal_residual_baseline
+    baseline = np.asarray(baseline_fn(dates, sales, as_of), dtype=float)
+    baseline = np.where(np.isfinite(baseline) & (baseline > 0), baseline, np.nan)
+    return baseline
+
+
 def train_hist_gbm(
     sales_train: pd.DataFrame,
     as_of: pd.Timestamp,
@@ -401,6 +416,8 @@ def train_xgboost_aux(
     params: dict[str, float | int | str] | None = None,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
     drop_lag_features: bool = False,
+    target_mode: str = "direct",
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = seasonal_residual_baseline,
     random_state: int = 42,
 ) -> tuple[object, list[str]]:
     if XGBRegressor is None:
@@ -415,6 +432,17 @@ def train_xgboost_aux(
     )
     X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
     y = np.log(sales_train.Revenue.values)
+    if target_mode == "residual":
+        baseline = _baseline_prediction_array(
+            baseline_fn, sales_train.Date, sales_train, as_of
+        )
+        valid = np.isfinite(baseline)
+        if not valid.any():
+            raise ValueError("Residual baseline produced no valid training rows.")
+        X = X.loc[valid].reset_index(drop=True)
+        y = y[valid] - np.log(np.clip(baseline[valid], 1e-6, None))
+    elif target_mode != "direct":
+        raise ValueError(f"Unsupported XGBoost target_mode: {target_mode}")
     model_params = dict(XGBOOST_AUX_PARAMS)
     if params is not None:
         model_params.update(params)
@@ -434,6 +462,9 @@ def predict_xgboost_aux(
     feature_order: list[str],
     *,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+    drop_lag_features: bool = False,
+    target_mode: str = "direct",
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = seasonal_residual_baseline,
 ) -> np.ndarray:
     X = _align_aux_prediction_matrix(
         val_dates,
@@ -442,7 +473,16 @@ def predict_xgboost_aux(
         feature_order,
         selected_aux_features=selected_aux_features,
     )
-    return np.exp(model.predict(X))
+    X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
+    pred_log = model.predict(X)
+    if target_mode == "direct":
+        return np.exp(pred_log)
+    if target_mode == "residual":
+        baseline = _baseline_prediction_array(baseline_fn, val_dates, sales_train, as_of)
+        if np.isnan(baseline).any():
+            raise ValueError("Residual baseline produced invalid prediction rows.")
+        return np.clip(baseline, 1e-6, None) * np.exp(pred_log)
+    raise ValueError(f"Unsupported XGBoost target_mode: {target_mode}")
 
 
 def train_mlp(
