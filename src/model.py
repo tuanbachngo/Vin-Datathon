@@ -25,7 +25,12 @@ try:
 except ImportError:  # pragma: no cover - optional dependency handled at runtime
     XGBRegressor = None
 
-from baselines import seasonal_residual_baseline
+from baselines import (
+    seasonal_lookup_level_adjusted,
+    seasonal_naive_growth_adjusted,
+    seasonal_naive_mean_2y,
+    seasonal_residual_baseline,
+)
 from features import build_feature_matrix
 from aux_features import (
     aux_feature_groups,
@@ -124,10 +129,15 @@ TOP_AUX_FEATURES = [
     "aux_unique_customers_roll30_548",
 ]
 
-XGB_AUX_NON_LAG_SUFFIXES = (
-    "_trend",
-    "_trend_month",
-    "_trend_month_dow",
+XGB_AUX_LAG_TOKENS = (
+    "_lag548",
+    "_lag730",
+    "_year1",
+    "_year2",
+    "_roll30_",
+    "_ewm30_",
+    "_ewm90_",
+    "_miss",
 )
 
 MLP_PARAMS = {
@@ -201,7 +211,7 @@ def _aux_matrix(
     selected_aux_features: list[str] | None,
 ) -> pd.DataFrame:
     aux_daily = build_aux_daily()
-    raw_aux_columns = aux_feature_groups(aux_daily)["all_aux"]
+    raw_aux_columns = list(dict.fromkeys(aux_feature_groups(aux_daily)["all_aux"]))
     X_base = _feature_matrix(dates, sales, as_of=as_of)
     X_aux = build_aux_feature_matrix(
         dates,
@@ -246,7 +256,7 @@ def _filter_xgboost_feature_matrix(
     keep_columns: list[str] = []
     for col in X.columns:
         if col.startswith("aux_"):
-            if col.endswith(XGB_AUX_NON_LAG_SUFFIXES):
+            if not any(token in col for token in XGB_AUX_LAG_TOKENS):
                 keep_columns.append(col)
             continue
         if col.startswith(("rev_lag_", "log_rev_lag_", "rev_roll", "rev_ewm")):
@@ -266,6 +276,111 @@ def _baseline_prediction_array(
     baseline = np.asarray(baseline_fn(dates, sales, as_of), dtype=float)
     baseline = np.where(np.isfinite(baseline) & (baseline > 0), baseline, np.nan)
     return baseline
+
+
+def _baseline_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    numerator = np.asarray(numerator, dtype=float)
+    denominator = np.asarray(denominator, dtype=float)
+    out = np.full(numerator.shape, np.nan, dtype=float)
+    valid = np.isfinite(numerator) & np.isfinite(denominator) & (np.abs(denominator) > 1e-6)
+    np.divide(numerator, denominator, out=out, where=valid)
+    return out
+
+
+def _baseline_feature_frame(
+    dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    *,
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
+) -> pd.DataFrame:
+    baseline_mean2y = _baseline_prediction_array(
+        seasonal_naive_mean_2y, dates, sales, as_of
+    )
+    baseline_growth = _baseline_prediction_array(
+        seasonal_naive_growth_adjusted, dates, sales, as_of
+    )
+    baseline_lookup = _baseline_prediction_array(
+        seasonal_lookup_level_adjusted, dates, sales, as_of
+    )
+    baseline_anchor = _baseline_prediction_array(
+        baseline_fn, dates, sales, as_of
+    )
+
+    baseline_stack = pd.DataFrame(
+        {
+            "baseline_mean2y": baseline_mean2y,
+            "baseline_growth": baseline_growth,
+            "baseline_lookup": baseline_lookup,
+        }
+    )
+    consensus = baseline_stack.mean(axis=1, skipna=True).to_numpy(dtype=float)
+    spread = (
+        baseline_stack.max(axis=1, skipna=True) - baseline_stack.min(axis=1, skipna=True)
+    ).to_numpy(dtype=float)
+
+    features = pd.DataFrame(
+        {
+            "baseline_mean2y": baseline_mean2y,
+            "baseline_growth": baseline_growth,
+            "baseline_lookup": baseline_lookup,
+            "baseline_anchor": baseline_anchor,
+            "baseline_consensus": consensus,
+            "baseline_spread": spread,
+        }
+    )
+
+    for col in [
+        "baseline_mean2y",
+        "baseline_growth",
+        "baseline_lookup",
+        "baseline_anchor",
+        "baseline_consensus",
+    ]:
+        features[f"log_{col}"] = np.log(np.clip(features[col].to_numpy(dtype=float), 1e-6, None))
+
+    features["baseline_gap_lookup_mean2y"] = (
+        features["baseline_lookup"] - features["baseline_mean2y"]
+    )
+    features["baseline_gap_growth_mean2y"] = (
+        features["baseline_growth"] - features["baseline_mean2y"]
+    )
+    features["baseline_gap_lookup_growth"] = (
+        features["baseline_lookup"] - features["baseline_growth"]
+    )
+    features["baseline_ratio_lookup_mean2y"] = _baseline_ratio(
+        features["baseline_lookup"].to_numpy(),
+        features["baseline_mean2y"].to_numpy(),
+    )
+    features["baseline_ratio_growth_mean2y"] = _baseline_ratio(
+        features["baseline_growth"].to_numpy(),
+        features["baseline_mean2y"].to_numpy(),
+    )
+    features["baseline_ratio_lookup_growth"] = _baseline_ratio(
+        features["baseline_lookup"].to_numpy(),
+        features["baseline_growth"].to_numpy(),
+    )
+    return features
+
+
+def _augment_xgboost_feature_matrix(
+    X: pd.DataFrame,
+    dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    *,
+    target_mode: str,
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
+) -> pd.DataFrame:
+    if target_mode != "residual":
+        return X
+    baseline_features = _baseline_feature_frame(
+        dates,
+        sales,
+        as_of,
+        baseline_fn=baseline_fn,
+    )
+    return pd.concat([X.reset_index(drop=True), baseline_features.reset_index(drop=True)], axis=1)
 
 
 def train_hist_gbm(
@@ -430,6 +545,14 @@ def train_xgboost_aux(
         as_of,
         selected_aux_features=selected_aux_features,
     )
+    X = _augment_xgboost_feature_matrix(
+        X,
+        sales_train.Date,
+        sales_train,
+        as_of,
+        target_mode=target_mode,
+        baseline_fn=baseline_fn,
+    )
     X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
     y = np.log(sales_train.Revenue.values)
     if target_mode == "residual":
@@ -466,14 +589,25 @@ def predict_xgboost_aux(
     target_mode: str = "direct",
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = seasonal_residual_baseline,
 ) -> np.ndarray:
-    X = _align_aux_prediction_matrix(
+    X = _aux_matrix(
         val_dates,
         sales_train,
         as_of,
-        feature_order,
         selected_aux_features=selected_aux_features,
     )
+    X = _augment_xgboost_feature_matrix(
+        X,
+        val_dates,
+        sales_train,
+        as_of,
+        target_mode=target_mode,
+        baseline_fn=baseline_fn,
+    )
     X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
+    for col in feature_order:
+        if col not in X.columns:
+            X[col] = np.nan
+    X = X[feature_order]
     pred_log = model.predict(X)
     if target_mode == "direct":
         return np.exp(pred_log)

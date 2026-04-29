@@ -14,6 +14,7 @@ from baselines import (
 )
 from calibration import RevenueCalibrator, fit_revenue_calibrator
 from model import (
+    TOP_AUX_FEATURES,
     predict_gbr,
     predict_hist_gbm,
     predict_lightgbm,
@@ -51,7 +52,7 @@ def xgb_artifact_paths(prefix: str) -> dict[str, Path]:
     }
 
 
-def xgb_runtime_config(no_lag: bool, no_lag_residual: bool) -> dict[str, str | bool]:
+def xgb_runtime_config(no_lag: bool, no_lag_residual: bool) -> dict[str, object]:
     if no_lag_residual:
         return {
             "artifact_prefix": "xgboost_no_lag_residual",
@@ -59,6 +60,7 @@ def xgb_runtime_config(no_lag: bool, no_lag_residual: bool) -> dict[str, str | b
             "submission_prefix": "submission_xgboost_top_aux_no_lag_residual",
             "drop_lag_features": True,
             "target_mode": "residual",
+            "selected_aux_features": None,
         }
     if no_lag:
         return {
@@ -67,6 +69,7 @@ def xgb_runtime_config(no_lag: bool, no_lag_residual: bool) -> dict[str, str | b
             "submission_prefix": "submission_xgboost_top_aux_no_lag",
             "drop_lag_features": True,
             "target_mode": "direct",
+            "selected_aux_features": TOP_AUX_FEATURES,
         }
     return {
         "artifact_prefix": "xgboost",
@@ -74,6 +77,7 @@ def xgb_runtime_config(no_lag: bool, no_lag_residual: bool) -> dict[str, str | b
         "submission_prefix": "submission_xgboost_top_aux",
         "drop_lag_features": False,
         "target_mode": "direct",
+        "selected_aux_features": TOP_AUX_FEATURES,
     }
 
 
@@ -123,6 +127,7 @@ def evaluate_cv(
     xgb_drop_lag_features: bool = False,
     xgb_target_mode: str = "direct",
     xgb_model_name: str = "xgboost_top_aux_log_target",
+    xgb_selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
 ) -> pd.DataFrame:
     rows: list[dict[str, float | str]] = []
     xgb_by_fold = None
@@ -184,6 +189,7 @@ def evaluate_cv(
                 train,
                 as_of=as_of,
                 params=xgb_params,
+                selected_aux_features=xgb_selected_aux_features,
                 drop_lag_features=xgb_drop_lag_features,
                 target_mode=xgb_target_mode,
             )
@@ -193,6 +199,7 @@ def evaluate_cv(
                 sales,
                 as_of,
                 xgb_feature_order,
+                selected_aux_features=xgb_selected_aux_features,
                 drop_lag_features=xgb_drop_lag_features,
                 target_mode=xgb_target_mode,
             )
@@ -246,6 +253,7 @@ def fit_and_submit(
     xgb_drop_lag_features: bool = False,
     xgb_target_mode: str = "direct",
     xgb_submission_prefix: str = "submission_xgboost_top_aux",
+    xgb_selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
     write_submission_alias: bool = True,
 ) -> Path:
     sub = pd.read_csv(DATA_DIR / "sample_submission.csv", parse_dates=["Date"])
@@ -271,6 +279,7 @@ def fit_and_submit(
         sales,
         as_of=as_of,
         params=xgb_params,
+        selected_aux_features=xgb_selected_aux_features,
         drop_lag_features=xgb_drop_lag_features,
         target_mode=xgb_target_mode,
     )
@@ -301,6 +310,7 @@ def fit_and_submit(
         sales,
         as_of,
         xgb_feature_order,
+        selected_aux_features=xgb_selected_aux_features,
         drop_lag_features=xgb_drop_lag_features,
         target_mode=xgb_target_mode,
     )
@@ -401,6 +411,7 @@ def main() -> None:
         tuning_result = tune_xgboost_hyperparameters(
             sales,
             n_trials=args.xgb_trials,
+            selected_aux_features=xgb_config["selected_aux_features"],
             drop_lag_features=bool(xgb_config["drop_lag_features"]),
             target_mode=str(xgb_config["target_mode"]),
         )
@@ -417,6 +428,7 @@ def main() -> None:
     xgb_oof = collect_xgboost_oof_predictions(
         sales,
         params=xgb_params,
+        selected_aux_features=xgb_config["selected_aux_features"],
         drop_lag_features=bool(xgb_config["drop_lag_features"]),
         target_mode=str(xgb_config["target_mode"]),
     )
@@ -443,6 +455,7 @@ def main() -> None:
         xgb_drop_lag_features=bool(xgb_config["drop_lag_features"]),
         xgb_target_mode=str(xgb_config["target_mode"]),
         xgb_model_name=str(xgb_config["model_name"]),
+        xgb_selected_aux_features=xgb_config["selected_aux_features"],
     )
     print(cv.round(3).to_string(index=False))
 
@@ -458,6 +471,7 @@ def main() -> None:
         xgb_drop_lag_features=bool(xgb_config["drop_lag_features"]),
         xgb_target_mode=str(xgb_config["target_mode"]),
         xgb_submission_prefix=str(xgb_config["submission_prefix"]),
+        xgb_selected_aux_features=xgb_config["selected_aux_features"],
         write_submission_alias=not (args.xgb_no_lag_residual or args.xgb_no_lag),
     )
     print(f"wrote {path}")

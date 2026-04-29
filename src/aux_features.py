@@ -481,6 +481,28 @@ def build_aux_feature_matrix(
         proj = _project_trend_seasonal(model, date_index)
         proj.columns = [f"aux_{col}_{c}" for c in proj.columns]
 
+        # Projection deltas make the seasonal lift explicit, which is often more
+        # useful to a residual learner than the absolute projected levels alone.
+        base_name = f"aux_{col}"
+        proj[f"{base_name}_month_lift"] = (
+            proj[f"{base_name}_trend_month"] - proj[f"{base_name}_trend"]
+        )
+        proj[f"{base_name}_dow_lift"] = (
+            proj[f"{base_name}_trend_month_dow"] - proj[f"{base_name}_trend_month"]
+        )
+        proj[f"{base_name}_month_ratio"] = np.divide(
+            proj[f"{base_name}_trend_month"],
+            proj[f"{base_name}_trend"],
+            out=np.full(len(proj), np.nan, dtype=float),
+            where=np.abs(proj[f"{base_name}_trend"].to_numpy()) > 1e-6,
+        )
+        proj[f"{base_name}_dow_ratio"] = np.divide(
+            proj[f"{base_name}_trend_month_dow"],
+            proj[f"{base_name}_trend_month"],
+            out=np.full(len(proj), np.nan, dtype=float),
+            where=np.abs(proj[f"{base_name}_trend_month"].to_numpy()) > 1e-6,
+        )
+
         roll30 = s.rolling(30, min_periods=10).mean()
         ewm30 = s.ewm(span=30, min_periods=10).mean()
         ewm90 = s.ewm(span=90, min_periods=20).mean()
