@@ -13,7 +13,14 @@ from baselines import (
     seasonal_naive_mean_2y,
 )
 from calibration import RevenueCalibrator, fit_revenue_calibrator
+from features import (
+    LOOKUP_HISTORY_MODE_FULL_HISTORY,
+    LOOKUP_HISTORY_MODE_LEGACY_STRUCTURE_RECENT_LEVEL,
+    LOOKUP_HISTORY_MODE_RECENT_REGIME,
+    LOOKUP_HISTORY_MODES,
+)
 from model import (
+    TOP_AUX_FEATURES,
     predict_gbr,
     predict_hist_gbm,
     predict_lightgbm,
@@ -29,6 +36,7 @@ from model import (
 )
 from tuning import collect_xgboost_oof_predictions, tune_xgboost_hyperparameters
 from validation import default_folds, metrics
+from xgb_feature_selection import select_aux_features_via_mic
 
 ROOT = Path(__file__).parent.parent
 DATA_DIR = ROOT / "data"
@@ -48,33 +56,57 @@ def xgb_artifact_paths(prefix: str) -> dict[str, Path]:
         "calibration_curve": OUT_DIR / f"{prefix}_calibration_curve.csv",
         "calibration_summary": OUT_DIR / f"{prefix}_calibration_summary.json",
         "cv": OUT_DIR / f"{prefix}_cv_results.csv",
+        "mic_scores": OUT_DIR / f"{prefix}_mic_scores.csv",
+        "mic_group_summary": OUT_DIR / f"{prefix}_mic_group_summary.csv",
+        "mic_summary": OUT_DIR / f"{prefix}_mic_summary.json",
+        "mic_selected": OUT_DIR / f"{prefix}_mic_selected_features.json",
     }
 
 
-def xgb_runtime_config(no_lag: bool, no_lag_residual: bool) -> dict[str, str | bool]:
+def xgb_runtime_config(
+    no_lag: bool,
+    no_lag_residual: bool,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
+    use_mic_features: bool = False,
+) -> dict[str, str | bool]:
     if no_lag_residual:
-        return {
+        config: dict[str, str | bool] = {
             "artifact_prefix": "xgboost_no_lag_residual",
             "model_name": "xgboost_top_aux_no_lag_residual",
             "submission_prefix": "submission_xgboost_top_aux_no_lag_residual",
             "drop_lag_features": True,
             "target_mode": "residual",
         }
-    if no_lag:
-        return {
+    elif no_lag:
+        config = {
             "artifact_prefix": "xgboost_no_lag",
             "model_name": "xgboost_top_aux_no_lag",
             "submission_prefix": "submission_xgboost_top_aux_no_lag",
             "drop_lag_features": True,
             "target_mode": "direct",
         }
-    return {
-        "artifact_prefix": "xgboost",
-        "model_name": "xgboost_top_aux_log_target",
-        "submission_prefix": "submission_xgboost_top_aux",
-        "drop_lag_features": False,
-        "target_mode": "direct",
-    }
+    else:
+        config = {
+            "artifact_prefix": "xgboost",
+            "model_name": "xgboost_top_aux_log_target",
+            "submission_prefix": "submission_xgboost_top_aux",
+            "drop_lag_features": False,
+            "target_mode": "direct",
+        }
+
+    suffixes: list[str] = []
+    if lookup_history_mode == LOOKUP_HISTORY_MODE_LEGACY_STRUCTURE_RECENT_LEVEL:
+        suffixes.append("legacy_lookup")
+    elif lookup_history_mode == LOOKUP_HISTORY_MODE_FULL_HISTORY:
+        suffixes.append("full_history_lookup")
+    if use_mic_features:
+        suffixes.append("mic")
+    if suffixes:
+        suffix = "_".join(suffixes)
+        for key in ("artifact_prefix", "model_name", "submission_prefix"):
+            config[key] = f"{config[key]}_{suffix}"
+    return config
 
 
 def load_sales() -> pd.DataFrame:
@@ -114,14 +146,24 @@ def save_calibration_summary(
         json.dump(_json_ready_dict(summary), handle, indent=2, ensure_ascii=True)
 
 
+def save_json_payload(
+    payload: object,
+    path: Path,
+) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=True)
+
+
 def evaluate_cv(
     sales: pd.DataFrame,
     *,
     xgb_params: dict[str, float | int | str] | None = None,
     xgb_oof: pd.DataFrame | None = None,
     xgb_calibrator: RevenueCalibrator | None = None,
+    xgb_selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
     xgb_drop_lag_features: bool = False,
     xgb_target_mode: str = "direct",
+    xgb_lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
     xgb_model_name: str = "xgboost_top_aux_log_target",
 ) -> pd.DataFrame:
     rows: list[dict[str, float | str]] = []
@@ -184,8 +226,10 @@ def evaluate_cv(
                 train,
                 as_of=as_of,
                 params=xgb_params,
+                selected_aux_features=xgb_selected_aux_features,
                 drop_lag_features=xgb_drop_lag_features,
                 target_mode=xgb_target_mode,
+                lookup_history_mode=xgb_lookup_history_mode,
             )
             p_xgb = predict_xgboost_aux(
                 xgb_model,
@@ -193,8 +237,10 @@ def evaluate_cv(
                 sales,
                 as_of,
                 xgb_feature_order,
+                selected_aux_features=xgb_selected_aux_features,
                 drop_lag_features=xgb_drop_lag_features,
                 target_mode=xgb_target_mode,
+                lookup_history_mode=xgb_lookup_history_mode,
             )
         else:
             fold_xgb = xgb_by_fold.get(fold.name)
@@ -243,8 +289,10 @@ def fit_and_submit(
     *,
     xgb_params: dict[str, float | int | str] | None = None,
     xgb_calibrator: RevenueCalibrator | None = None,
+    xgb_selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
     xgb_drop_lag_features: bool = False,
     xgb_target_mode: str = "direct",
+    xgb_lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
     xgb_submission_prefix: str = "submission_xgboost_top_aux",
     write_submission_alias: bool = True,
 ) -> Path:
@@ -271,8 +319,10 @@ def fit_and_submit(
         sales,
         as_of=as_of,
         params=xgb_params,
+        selected_aux_features=xgb_selected_aux_features,
         drop_lag_features=xgb_drop_lag_features,
         target_mode=xgb_target_mode,
+        lookup_history_mode=xgb_lookup_history_mode,
     )
     mlp_model, mlp_feature_order = train_mlp(sales, as_of=as_of)
 
@@ -301,8 +351,10 @@ def fit_and_submit(
         sales,
         as_of,
         xgb_feature_order,
+        selected_aux_features=xgb_selected_aux_features,
         drop_lag_features=xgb_drop_lag_features,
         target_mode=xgb_target_mode,
+        lookup_history_mode=xgb_lookup_history_mode,
     )
     pred_xgb_calibrated = (
         xgb_calibrator.predict(pred_xgb) if xgb_calibrator is not None else pred_xgb
@@ -377,6 +429,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use the no-lag XGBoost feature space and train on residuals over a seasonal baseline.",
     )
+    parser.add_argument(
+        "--xgb-lookup-history-mode",
+        choices=LOOKUP_HISTORY_MODES,
+        default=LOOKUP_HISTORY_MODE_RECENT_REGIME,
+        help=(
+            "Seasonal lookup history mode for XGBoost feature/baseline construction. "
+            "`legacy_structure_recent_level` keeps pre-2020 seasonal structure while "
+            "still scaling levels with the latest 12 months."
+        ),
+    )
+    parser.add_argument(
+        "--xgb-mic-select",
+        action="store_true",
+        help=(
+            "Build a MIC-ranked auxiliary feature list from train folds before "
+            "tuning/CV/submission and use it as selected_aux_features."
+        ),
+    )
+    parser.add_argument(
+        "--xgb-mic-top-n",
+        type=int,
+        default=len(TOP_AUX_FEATURES),
+        help="Number of MIC-ranked auxiliary features to keep when --xgb-mic-select is enabled.",
+    )
+    parser.add_argument(
+        "--xgb-mic-family-top-k",
+        type=int,
+        default=2,
+        help="Maximum MIC-selected variants to keep per raw auxiliary series.",
+    )
+    parser.add_argument(
+        "--xgb-mic-stability-threshold",
+        type=float,
+        default=0.15,
+        help=(
+            "Minimum pre-2020 vs post-2020 MIC ratio for stability filtering. "
+            "Features with missing regime coverage bypass this filter."
+        ),
+    )
+    parser.add_argument(
+        "--xgb-mic-min-regime-rows",
+        type=int,
+        default=180,
+        help="Minimum rows required inside a regime subset before MIC stability is computed.",
+    )
+    parser.add_argument(
+        "--xgb-mic-max-bins",
+        type=int,
+        default=8,
+        help="Maximum quantile bin count for the MIC approximation backend.",
+    )
     return parser
 
 
@@ -388,10 +491,43 @@ def main() -> None:
         f"{sales.Date.min().date()} -> {sales.Date.max().date()}"
     )
 
-    xgb_config = xgb_runtime_config(args.xgb_no_lag, args.xgb_no_lag_residual)
+    xgb_config = xgb_runtime_config(
+        args.xgb_no_lag,
+        args.xgb_no_lag_residual,
+        lookup_history_mode=str(args.xgb_lookup_history_mode),
+        use_mic_features=bool(args.xgb_mic_select),
+    )
     xgb_paths = xgb_artifact_paths(str(xgb_config["artifact_prefix"]))
     xgb_params = load_xgboost_params(xgb_paths["params"])
     xgb_source = "defaults"
+    xgb_selected_aux_features: list[str] | None = TOP_AUX_FEATURES
+
+    if args.xgb_mic_select:
+        print(
+            "\n=== MIC auxiliary feature selection "
+            f"({xgb_config['artifact_prefix']}, top_n={args.xgb_mic_top_n}) ==="
+        )
+        mic_result = select_aux_features_via_mic(
+            sales,
+            drop_lag_features=bool(xgb_config["drop_lag_features"]),
+            target_mode=str(xgb_config["target_mode"]),
+            lookup_history_mode=str(args.xgb_lookup_history_mode),
+            top_n=int(args.xgb_mic_top_n),
+            family_top_k=int(args.xgb_mic_family_top_k),
+            stability_threshold=float(args.xgb_mic_stability_threshold),
+            min_regime_rows=int(args.xgb_mic_min_regime_rows),
+            max_bins=int(args.xgb_mic_max_bins),
+        )
+        xgb_selected_aux_features = mic_result.selected_features
+        mic_result.feature_scores.to_csv(xgb_paths["mic_scores"], index=False)
+        mic_result.group_summary.to_csv(xgb_paths["mic_group_summary"], index=False)
+        save_json_payload(mic_result.summary, xgb_paths["mic_summary"])
+        save_json_payload(mic_result.selected_features, xgb_paths["mic_selected"])
+        print(
+            f"Selected {len(xgb_selected_aux_features)} aux features via "
+            f"{mic_result.summary['backend']}:"
+        )
+        print(", ".join(xgb_selected_aux_features))
 
     if args.tune_xgboost:
         print(
@@ -401,8 +537,10 @@ def main() -> None:
         tuning_result = tune_xgboost_hyperparameters(
             sales,
             n_trials=args.xgb_trials,
+            selected_aux_features=xgb_selected_aux_features,
             drop_lag_features=bool(xgb_config["drop_lag_features"]),
             target_mode=str(xgb_config["target_mode"]),
+            lookup_history_mode=str(args.xgb_lookup_history_mode),
         )
         xgb_params = tuning_result.best_params
         xgb_source = f"optuna_{args.xgb_trials}_trials"
@@ -417,8 +555,10 @@ def main() -> None:
     xgb_oof = collect_xgboost_oof_predictions(
         sales,
         params=xgb_params,
+        selected_aux_features=xgb_selected_aux_features,
         drop_lag_features=bool(xgb_config["drop_lag_features"]),
         target_mode=str(xgb_config["target_mode"]),
+        lookup_history_mode=str(args.xgb_lookup_history_mode),
     )
     xgb_oof.to_csv(xgb_paths["oof"], index=False)
 
@@ -440,8 +580,10 @@ def main() -> None:
         xgb_params=xgb_params,
         xgb_oof=xgb_oof,
         xgb_calibrator=calibration_result.calibrator,
+        xgb_selected_aux_features=xgb_selected_aux_features,
         xgb_drop_lag_features=bool(xgb_config["drop_lag_features"]),
         xgb_target_mode=str(xgb_config["target_mode"]),
+        xgb_lookup_history_mode=str(args.xgb_lookup_history_mode),
         xgb_model_name=str(xgb_config["model_name"]),
     )
     print(cv.round(3).to_string(index=False))
@@ -455,8 +597,10 @@ def main() -> None:
         sales,
         xgb_params=xgb_params,
         xgb_calibrator=calibration_result.calibrator,
+        xgb_selected_aux_features=xgb_selected_aux_features,
         xgb_drop_lag_features=bool(xgb_config["drop_lag_features"]),
         xgb_target_mode=str(xgb_config["target_mode"]),
+        xgb_lookup_history_mode=str(args.xgb_lookup_history_mode),
         xgb_submission_prefix=str(xgb_config["submission_prefix"]),
         write_submission_alias=not (args.xgb_no_lag_residual or args.xgb_no_lag),
     )

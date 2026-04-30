@@ -13,6 +13,18 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+LOOKUP_HISTORY_MODE_RECENT_REGIME = "recent_regime"
+LOOKUP_HISTORY_MODE_LEGACY_STRUCTURE_RECENT_LEVEL = (
+    "legacy_structure_recent_level"
+)
+LOOKUP_HISTORY_MODE_FULL_HISTORY = "full_history"
+LOOKUP_HISTORY_MODES = (
+    LOOKUP_HISTORY_MODE_RECENT_REGIME,
+    LOOKUP_HISTORY_MODE_LEGACY_STRUCTURE_RECENT_LEVEL,
+    LOOKUP_HISTORY_MODE_FULL_HISTORY,
+)
+LOOKUP_LEGACY_CUTOFF = pd.Timestamp("2020-01-01")
+
 TET_DATES = {
     2012: "2012-01-23", 2013: "2013-02-10", 2014: "2014-01-31",
     2015: "2015-02-19", 2016: "2016-02-08", 2017: "2017-01-28",
@@ -54,6 +66,25 @@ VN_FIXED_HOLIDAYS = [
     ("05-01", "labor"),
     ("09-02", "national"),
 ]
+
+
+def _lookup_base_history(
+    hist: pd.DataFrame,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
+) -> pd.DataFrame:
+    if lookup_history_mode == LOOKUP_HISTORY_MODE_RECENT_REGIME:
+        recent_mask = hist["year"] >= 2019
+        return hist.loc[recent_mask].copy() if recent_mask.sum() > 300 else hist.copy()
+    if lookup_history_mode == LOOKUP_HISTORY_MODE_LEGACY_STRUCTURE_RECENT_LEVEL:
+        legacy_mask = hist["Date"] < LOOKUP_LEGACY_CUTOFF
+        return hist.loc[legacy_mask].copy() if legacy_mask.sum() > 300 else hist.copy()
+    if lookup_history_mode == LOOKUP_HISTORY_MODE_FULL_HISTORY:
+        return hist.copy()
+    raise ValueError(
+        "Unsupported lookup_history_mode: "
+        f"{lookup_history_mode!r}. Expected one of {LOOKUP_HISTORY_MODES}."
+    )
 
 
 def _calendar_features(dates: pd.Series) -> pd.DataFrame:
@@ -193,7 +224,11 @@ def _long_lag_features(dates: pd.Series, sales: pd.DataFrame) -> pd.DataFrame:
 
 
 def _seasonal_lookup_features(
-    dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
+    dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> pd.DataFrame:
     """Historical averages keyed by calendar position, computed strictly from
     rows on or before `as_of`. Re-built per fold to avoid temporal leakage.
@@ -213,9 +248,7 @@ def _seasonal_lookup_features(
     hist["doy"] = hist.Date.dt.dayofyear
     hist["week"] = hist.Date.dt.isocalendar().week.astype(int)
 
-    # Recent-regime-only averages (2019+ if available; else whole history)
-    recent_mask = hist.year >= 2019
-    base = hist[recent_mask] if recent_mask.sum() > 300 else hist
+    base = _lookup_base_history(hist, lookup_history_mode=lookup_history_mode)
 
     # August regime fix: instead of dropping 2020, use year-parity aware means
     # for the month-8 rows only (the only strongly biennial month in history).
@@ -281,6 +314,8 @@ def build_feature_matrix(
     target_dates: pd.Series,
     sales: pd.DataFrame,
     as_of: pd.Timestamp,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> pd.DataFrame:
 
     assert sales.Date.max() >= as_of, "as_of past sales history"
@@ -288,7 +323,12 @@ def build_feature_matrix(
 
     cal = _calendar_features(target_dates)
     lags = _long_lag_features(target_dates, sales_masked)
-    lookup = _seasonal_lookup_features(target_dates, sales_masked, as_of)
+    lookup = _seasonal_lookup_features(
+        target_dates,
+        sales_masked,
+        as_of,
+        lookup_history_mode=lookup_history_mode,
+    )
 
     X = pd.concat([cal.reset_index(drop=True),
                    lags.reset_index(drop=True),

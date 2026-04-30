@@ -26,7 +26,10 @@ except ImportError:  # pragma: no cover - optional dependency handled at runtime
     XGBRegressor = None
 
 from baselines import seasonal_residual_baseline
-from features import build_feature_matrix
+from features import (
+    LOOKUP_HISTORY_MODE_RECENT_REGIME,
+    build_feature_matrix,
+)
 from aux_features import (
     aux_feature_groups,
     build_aux_daily,
@@ -161,8 +164,14 @@ def _feature_matrix(
     as_of: pd.Timestamp,
     *,
     indicator_columns: list[str] | None = None,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> pd.DataFrame:
-    feats = build_feature_matrix(dates, sales, as_of=as_of)
+    feats = build_feature_matrix(
+        dates,
+        sales,
+        as_of=as_of,
+        lookup_history_mode=lookup_history_mode,
+    )
     X = feats.drop(columns=FEATURE_DROP)
     return _add_missing_indicators(X, indicator_columns=indicator_columns)
 
@@ -171,8 +180,15 @@ def _xy(
     frame: pd.DataFrame,
     sales: pd.DataFrame,
     as_of: pd.Timestamp,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> tuple[pd.DataFrame, np.ndarray | None]:
-    X = _feature_matrix(frame.Date, sales, as_of=as_of)
+    X = _feature_matrix(
+        frame.Date,
+        sales,
+        as_of=as_of,
+        lookup_history_mode=lookup_history_mode,
+    )
     y = np.log(frame.Revenue.values) if "Revenue" in frame.columns else None
     return X, y
 
@@ -182,10 +198,16 @@ def _align_prediction_matrix(
     sales_train: pd.DataFrame,
     as_of: pd.Timestamp,
     feature_order: list[str],
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> pd.DataFrame:
     indicator_columns = [c[:-8] for c in feature_order if c.endswith("_missing")]
     X = _feature_matrix(
-        dates, sales_train, as_of=as_of, indicator_columns=indicator_columns
+        dates,
+        sales_train,
+        as_of=as_of,
+        indicator_columns=indicator_columns,
+        lookup_history_mode=lookup_history_mode,
     )
     for col in feature_order:
         if col not in X.columns:
@@ -199,10 +221,16 @@ def _aux_matrix(
     as_of: pd.Timestamp,
     *,
     selected_aux_features: list[str] | None,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> pd.DataFrame:
     aux_daily = build_aux_daily()
     raw_aux_columns = aux_feature_groups(aux_daily)["all_aux"]
-    X_base = _feature_matrix(dates, sales, as_of=as_of)
+    X_base = _feature_matrix(
+        dates,
+        sales,
+        as_of=as_of,
+        lookup_history_mode=lookup_history_mode,
+    )
     X_aux = build_aux_feature_matrix(
         dates,
         as_of,
@@ -222,12 +250,14 @@ def _align_aux_prediction_matrix(
     feature_order: list[str],
     *,
     selected_aux_features: list[str] | None,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> pd.DataFrame:
     X = _aux_matrix(
         dates,
         sales_train,
         as_of,
         selected_aux_features=selected_aux_features,
+        lookup_history_mode=lookup_history_mode,
     )
     for col in feature_order:
         if col not in X.columns:
@@ -260,10 +290,23 @@ def _baseline_prediction_array(
     dates: pd.Series,
     sales: pd.DataFrame,
     as_of: pd.Timestamp,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> np.ndarray:
     if baseline_fn is None:
         baseline_fn = seasonal_residual_baseline
-    baseline = np.asarray(baseline_fn(dates, sales, as_of), dtype=float)
+    try:
+        baseline = np.asarray(
+            baseline_fn(
+                dates,
+                sales,
+                as_of,
+                lookup_history_mode=lookup_history_mode,
+            ),
+            dtype=float,
+        )
+    except TypeError:
+        baseline = np.asarray(baseline_fn(dates, sales, as_of), dtype=float)
     baseline = np.where(np.isfinite(baseline) & (baseline > 0), baseline, np.nan)
     return baseline
 
@@ -369,6 +412,7 @@ def train_lightgbm_aux(
     as_of: pd.Timestamp,
     *,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
     random_state: int = 42,
 ) -> tuple[object, list[str]]:
     if LGBMRegressor is None:
@@ -380,6 +424,7 @@ def train_lightgbm_aux(
         sales_train,
         as_of,
         selected_aux_features=selected_aux_features,
+        lookup_history_mode=lookup_history_mode,
     )
     y = np.log(sales_train.Revenue.values)
     model = LGBMRegressor(
@@ -398,6 +443,7 @@ def predict_lightgbm_aux(
     feature_order: list[str],
     *,
     selected_aux_features: list[str] | None = TOP_AUX_FEATURES,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> np.ndarray:
     X = _align_aux_prediction_matrix(
         val_dates,
@@ -405,6 +451,7 @@ def predict_lightgbm_aux(
         as_of,
         feature_order,
         selected_aux_features=selected_aux_features,
+        lookup_history_mode=lookup_history_mode,
     )
     return np.exp(model.predict(X))
 
@@ -418,6 +465,7 @@ def train_xgboost_aux(
     drop_lag_features: bool = False,
     target_mode: str = "direct",
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = seasonal_residual_baseline,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
     random_state: int = 42,
 ) -> tuple[object, list[str]]:
     if XGBRegressor is None:
@@ -429,12 +477,17 @@ def train_xgboost_aux(
         sales_train,
         as_of,
         selected_aux_features=selected_aux_features,
+        lookup_history_mode=lookup_history_mode,
     )
     X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
     y = np.log(sales_train.Revenue.values)
     if target_mode == "residual":
         baseline = _baseline_prediction_array(
-            baseline_fn, sales_train.Date, sales_train, as_of
+            baseline_fn,
+            sales_train.Date,
+            sales_train,
+            as_of,
+            lookup_history_mode=lookup_history_mode,
         )
         valid = np.isfinite(baseline)
         if not valid.any():
@@ -465,6 +518,7 @@ def predict_xgboost_aux(
     drop_lag_features: bool = False,
     target_mode: str = "direct",
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = seasonal_residual_baseline,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> np.ndarray:
     X = _align_aux_prediction_matrix(
         val_dates,
@@ -472,13 +526,20 @@ def predict_xgboost_aux(
         as_of,
         feature_order,
         selected_aux_features=selected_aux_features,
+        lookup_history_mode=lookup_history_mode,
     )
     X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
     pred_log = model.predict(X)
     if target_mode == "direct":
         return np.exp(pred_log)
     if target_mode == "residual":
-        baseline = _baseline_prediction_array(baseline_fn, val_dates, sales_train, as_of)
+        baseline = _baseline_prediction_array(
+            baseline_fn,
+            val_dates,
+            sales_train,
+            as_of,
+            lookup_history_mode=lookup_history_mode,
+        )
         if np.isnan(baseline).any():
             raise ValueError("Residual baseline produced invalid prediction rows.")
         return np.clip(baseline, 1e-6, None) * np.exp(pred_log)

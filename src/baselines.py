@@ -2,6 +2,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from features import (
+    LOOKUP_HISTORY_MODE_RECENT_REGIME,
+    _lookup_base_history,
+)
+
 
 def _safe_mean(*arrays: np.ndarray) -> np.ndarray:
     stacked = np.vstack(arrays).astype(float)
@@ -59,16 +64,20 @@ def seasonal_naive_growth_adjusted(
 
 
 def _seasonal_lookup_level_adjusted(
-    target_dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
+    target_dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> np.ndarray:
     hist = sales[sales.Date <= as_of].copy()
     if hist.empty:
         return np.full(len(target_dates), np.nan, dtype=float)
 
+    hist["year"] = hist.Date.dt.year
     hist["month"] = hist.Date.dt.month
     hist["dow"] = hist.Date.dt.dayofweek
-    recent_mask = hist.Date.dt.year >= 2019
-    base = hist.loc[recent_mask].copy() if recent_mask.sum() > 300 else hist.copy()
+    base = _lookup_base_history(hist, lookup_history_mode=lookup_history_mode)
 
     month_mean = base.groupby("month").Revenue.mean()
     month_dow_mean = base.groupby(["month", "dow"]).Revenue.mean()
@@ -92,10 +101,19 @@ def _seasonal_lookup_level_adjusted(
 
 
 def seasonal_residual_baseline(
-    target_dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
+    target_dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    *,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
 ) -> np.ndarray:
     mean_2y = seasonal_naive_mean_2y(target_dates, sales, as_of)
-    lookup = _seasonal_lookup_level_adjusted(target_dates, sales, as_of)
+    lookup = _seasonal_lookup_level_adjusted(
+        target_dates,
+        sales,
+        as_of,
+        lookup_history_mode=lookup_history_mode,
+    )
 
     preds = np.asarray(mean_2y, dtype=float)
     preds = np.where(np.isfinite(preds), preds, lookup)

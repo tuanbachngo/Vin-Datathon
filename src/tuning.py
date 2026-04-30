@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover - optional dependency handled at runtime
     optuna = None
 
 from model import (
+    LOOKUP_HISTORY_MODE_RECENT_REGIME,
     TOP_AUX_FEATURES,
     XGBOOST_AUX_PARAMS,
     predict_xgboost_aux,
@@ -37,6 +38,7 @@ def collect_xgboost_oof_predictions(
     drop_lag_features: bool = False,
     target_mode: str = "direct",
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = None,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
     random_state: int = 42,
 ) -> pd.DataFrame:
     folds = default_folds() if folds is None else folds
@@ -53,6 +55,7 @@ def collect_xgboost_oof_predictions(
             drop_lag_features=drop_lag_features,
             target_mode=target_mode,
             baseline_fn=baseline_fn,
+            lookup_history_mode=lookup_history_mode,
             random_state=random_state,
         )
         pred = predict_xgboost_aux(
@@ -65,6 +68,7 @@ def collect_xgboost_oof_predictions(
             drop_lag_features=drop_lag_features,
             target_mode=target_mode,
             baseline_fn=baseline_fn,
+            lookup_history_mode=lookup_history_mode,
         )
         rows.append(
             pd.DataFrame(
@@ -90,6 +94,7 @@ def tune_xgboost_hyperparameters(
     drop_lag_features: bool = False,
     target_mode: str = "direct",
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = None,
+    lookup_history_mode: str = LOOKUP_HISTORY_MODE_RECENT_REGIME,
     random_state: int = 42,
 ) -> XGBoostTuningResult:
     if optuna is None:
@@ -132,6 +137,7 @@ def tune_xgboost_hyperparameters(
                 drop_lag_features=drop_lag_features,
                 target_mode=target_mode,
                 baseline_fn=baseline_fn,
+                lookup_history_mode=lookup_history_mode,
                 random_state=random_state,
             )
             pred = predict_xgboost_aux(
@@ -144,6 +150,7 @@ def tune_xgboost_hyperparameters(
                 drop_lag_features=drop_lag_features,
                 target_mode=target_mode,
                 baseline_fn=baseline_fn,
+                lookup_history_mode=lookup_history_mode,
             )
             fold_metrics = metrics(val.Revenue.to_numpy(), pred)
             fold_rmses.append(fold_metrics["RMSE"])

@@ -57,6 +57,25 @@ To tune the `xgboost` model with Optuna before generating CV results and submiss
 .\.venv\Scripts\python.exe -m src.run_pipeline --tune-xgboost --xgb-trials 40
 ```
 
+To run the `xgboost residual no lag` branch with the legacy seasonal-structure
+lookup and MIC-ranked auxiliary feature selection:
+
+```powershell
+.\.venv\Scripts\python.exe src\run_pipeline.py `
+  --xgb-no-lag-residual `
+  --xgb-lookup-history-mode legacy_structure_recent_level `
+  --xgb-mic-select `
+  --xgb-mic-top-n 20
+```
+
+Notes:
+
+- `legacy_structure_recent_level` uses pre-2020 rows for seasonal lookup
+  structure, while still scaling levels with the latest 12 months.
+- MIC feature selection uses `minepy` when available. If `minepy` is not
+  installed, the pipeline falls back to a deterministic quantile-binned mutual
+  information approximation.
+
 Key artifacts:
 
 - `outputs/xgboost_best_params.json`: cached best parameters from Optuna
