@@ -25,13 +25,24 @@ try:
 except ImportError:  # pragma: no cover - optional dependency handled at runtime
     XGBRegressor = None
 
-from baselines import seasonal_residual_baseline
-from features import build_feature_matrix
-from aux_features import (
-    aux_feature_groups,
-    build_aux_daily,
-    build_aux_feature_matrix,
-)
+try:  # Package import when used from notebooks: from src.model import ...
+    from .baselines import seasonal_residual_baseline, seasonal_residual_baseline_components
+    from .features import build_feature_matrix
+    from .aux_features import (
+        aux_feature_groups,
+        build_aux_daily,
+        build_aux_feature_matrix,
+        build_commercial_seasonality_features,
+    )
+except ImportError:  # Direct script-style import when src/ is on sys.path.
+    from baselines import seasonal_residual_baseline, seasonal_residual_baseline_components
+    from features import build_feature_matrix
+    from aux_features import (
+        aux_feature_groups,
+        build_aux_daily,
+        build_aux_feature_matrix,
+        build_commercial_seasonality_features,
+    )
 
 
 FEATURE_DROP = ["Date"]
@@ -122,13 +133,41 @@ TOP_AUX_FEATURES = [
     "aux_sessions_ewm90_548",
     "aux_page_views_trend",
     "aux_unique_customers_roll30_548",
+    "aux_promo_net_sales_share_trend_month",
+    "aux_promo_discount_to_gross_sales_trend_month",
+    "aux_low_margin_sales_share_trend_month",
+    "aux_promo_margin_dilution_score_trend_month",
+    "aux_streetwear_low_margin_promo_pressure_trend_month",
+    "aux_organic_search_session_share_trend_month",
+    "aux_paid_traffic_share_trend_month",
+    "aux_organic_conversion_mismatch_trend_month",
+    "aux_paid_low_intent_pressure_trend_month",
+    "aux_low_rating_share_trend_month",
+    "aux_repeat_order_share_trend_month",
 ]
 
-XGB_AUX_NON_LAG_SUFFIXES = (
-    "_trend",
-    "_trend_month",
-    "_trend_month_dow",
+# Tokens used by no-lag XGBoost mode. Drops only genuine lag-like columns.
+XGB_LAG_LIKE_TOKENS = (
+    "rev_lag_",
+    "log_rev_lag_",
+    "_lag",
+    "lag_",
+    "_year1",
+    "_year2",
+    "_roll",
+    "roll",
+    "_ewm",
+    "ewm",
+    "_365",
+    "_548",
+    "_730",
+    "_1095",
+    "end_365d_ago",
+    "end_548d_ago",
+    "end_730d_ago",
+    "end_1095d_ago",
 )
+
 
 MLP_PARAMS = {
     "hidden_layer_sizes": (64, 32),
@@ -209,10 +248,44 @@ def _aux_matrix(
         raw_aux_columns,
         aux_daily=aux_daily,
     )
+    X_commercial = build_commercial_seasonality_features(
+        dates,
+        as_of,
+        aux_daily=aux_daily,
+    )
+    if "promo_seasonality_score" in X_commercial.columns:
+        X_commercial["promo_seasonality_x_month_end"] = (
+            X_commercial["promo_seasonality_score"].astype(float)
+            * X_base["month_end_window"].astype(float)
+        )
+        X_commercial["promo_seasonality_x_year_end_clearance"] = (
+            X_commercial["promo_seasonality_score"].astype(float)
+            * X_base["year_end_inventory_clearance_window"].astype(float)
+        )
+        X_commercial["promo_seasonality_x_pre_tet"] = (
+            X_commercial["promo_seasonality_score"].astype(float)
+            * X_base["pre_tet_window"].astype(float)
+        )
+    if "historical_conversion_seasonality_score" in X_commercial.columns:
+        X_commercial["conversion_seasonality_x_month_end"] = (
+            X_commercial["historical_conversion_seasonality_score"].astype(float)
+            * X_base["month_end_window"].astype(float)
+        )
+        X_commercial["conversion_seasonality_x_odd_q4"] = (
+            X_commercial["historical_conversion_seasonality_score"].astype(float)
+            * X_base["odd_year_q4_pressure_flag"].astype(float)
+        )
     if selected_aux_features is not None:
         keep = [c for c in selected_aux_features if c in X_aux.columns]
         X_aux = X_aux[keep]
-    return pd.concat([X_base.reset_index(drop=True), X_aux.reset_index(drop=True)], axis=1)
+    return pd.concat(
+        [
+            X_base.reset_index(drop=True),
+            X_commercial.reset_index(drop=True),
+            X_aux.reset_index(drop=True),
+        ],
+        axis=1,
+    )
 
 
 def _align_aux_prediction_matrix(
@@ -235,6 +308,12 @@ def _align_aux_prediction_matrix(
     return X[feature_order]
 
 
+
+def _is_lag_like_feature(column: str) -> bool:
+    c = column.lower()
+    return any(token in c for token in XGB_LAG_LIKE_TOKENS)
+
+
 def _filter_xgboost_feature_matrix(
     X: pd.DataFrame,
     *,
@@ -242,18 +321,88 @@ def _filter_xgboost_feature_matrix(
 ) -> pd.DataFrame:
     if not drop_lag_features:
         return X
-
-    keep_columns: list[str] = []
-    for col in X.columns:
-        if col.startswith("aux_"):
-            if col.endswith(XGB_AUX_NON_LAG_SUFFIXES):
-                keep_columns.append(col)
-            continue
-        if col.startswith(("rev_lag_", "log_rev_lag_", "rev_roll", "rev_ewm")):
-            continue
-        keep_columns.append(col)
+    keep_columns = [col for col in X.columns if not _is_lag_like_feature(col)]
     return X[keep_columns]
 
+
+def _residual_baseline_feature_matrix(
+    dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
+) -> pd.DataFrame:
+    use_default = baseline_fn is None or baseline_fn is seasonal_residual_baseline
+    if use_default:
+        return seasonal_residual_baseline_components(dates, sales, as_of).reset_index(drop=True)
+
+    anchor = _baseline_prediction_array(baseline_fn, dates, sales, as_of)
+    out = pd.DataFrame({"baseline_anchor": anchor})
+    out["log_baseline_anchor"] = np.log(np.maximum(out["baseline_anchor"], 1.0))
+    return out.replace([np.inf, -np.inf], np.nan).reset_index(drop=True)
+
+
+def _add_residual_baseline_features(
+    X: pd.DataFrame,
+    dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
+) -> pd.DataFrame:
+    baseline_features = _residual_baseline_feature_matrix(
+        dates, sales, as_of, baseline_fn
+    )
+    return pd.concat(
+        [X.reset_index(drop=True), baseline_features.reset_index(drop=True)],
+        axis=1,
+    )
+
+
+def _build_xgboost_aux_matrix(
+    dates: pd.Series,
+    sales: pd.DataFrame,
+    as_of: pd.Timestamp,
+    *,
+    selected_aux_features: list[str] | None,
+    drop_lag_features: bool,
+    target_mode: str,
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
+) -> pd.DataFrame:
+    X = _aux_matrix(
+        dates,
+        sales,
+        as_of,
+        selected_aux_features=selected_aux_features,
+    )
+    X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
+    if target_mode == "residual":
+        X = _add_residual_baseline_features(X, dates, sales, as_of, baseline_fn)
+    return X
+
+
+def _align_xgboost_aux_prediction_matrix(
+    dates: pd.Series,
+    sales_train: pd.DataFrame,
+    as_of: pd.Timestamp,
+    feature_order: list[str],
+    *,
+    selected_aux_features: list[str] | None,
+    drop_lag_features: bool,
+    target_mode: str,
+    baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
+) -> pd.DataFrame:
+    X = _build_xgboost_aux_matrix(
+        dates,
+        sales_train,
+        as_of,
+        selected_aux_features=selected_aux_features,
+        drop_lag_features=drop_lag_features,
+        target_mode=target_mode,
+        baseline_fn=baseline_fn,
+    )
+    for col in feature_order:
+        if col not in X.columns:
+            X[col] = np.nan
+    return X[feature_order]
 
 def _baseline_prediction_array(
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None,
@@ -266,6 +415,47 @@ def _baseline_prediction_array(
     baseline = np.asarray(baseline_fn(dates, sales, as_of), dtype=float)
     baseline = np.where(np.isfinite(baseline) & (baseline > 0), baseline, np.nan)
     return baseline
+
+
+def _outlier_sample_weights(
+    sales_train: pd.DataFrame,
+    *,
+    outlier_weight: float = 0.35,
+) -> np.ndarray:
+    """Downweight extreme revenue / gross-margin days without deleting them."""
+    frame = sales_train.copy()
+    frame["_row_order"] = np.arange(len(frame))
+    frame = frame.sort_values("Date").set_index("Date")
+    weights = np.ones(len(frame), dtype=float)
+
+    revenue_median = frame.Revenue.rolling(28, center=True, min_periods=10).median()
+    revenue_mad = (
+        (frame.Revenue - revenue_median)
+        .abs()
+        .rolling(28, center=True, min_periods=10)
+        .median()
+    )
+    revenue_z = (frame.Revenue - revenue_median) / (1.4826 * revenue_mad.replace(0, np.nan))
+    outlier_mask = revenue_z.abs() >= 4
+
+    if {"COGS", "Revenue"}.issubset(frame.columns):
+        gross_margin_pct = np.where(
+            frame.Revenue > 0,
+            (frame.Revenue - frame.COGS) / frame.Revenue,
+            np.nan,
+        )
+        gm = pd.Series(gross_margin_pct, index=frame.index)
+        gm_median = gm.rolling(28, center=True, min_periods=10).median()
+        gm_mad = (gm - gm_median).abs().rolling(28, center=True, min_periods=10).median()
+        gm_z = (gm - gm_median) / (1.4826 * gm_mad.replace(0, np.nan))
+        outlier_mask = outlier_mask | (gm_z.abs() >= 4)
+
+    weights[np.asarray(outlier_mask.fillna(False), dtype=bool)] = outlier_weight
+    return (
+        pd.Series(weights, index=frame["_row_order"].to_numpy())
+        .sort_index()
+        .to_numpy()
+    )
 
 
 def train_hist_gbm(
@@ -418,19 +608,22 @@ def train_xgboost_aux(
     drop_lag_features: bool = False,
     target_mode: str = "direct",
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = seasonal_residual_baseline,
+    outlier_downweight: bool = False,
     random_state: int = 42,
 ) -> tuple[object, list[str]]:
     if XGBRegressor is None:
         raise ImportError(
             "xgboost is not installed. Run `.venv\\Scripts\\python.exe -m pip install xgboost`."
         )
-    X = _aux_matrix(
+    X = _build_xgboost_aux_matrix(
         sales_train.Date,
         sales_train,
         as_of,
         selected_aux_features=selected_aux_features,
+        drop_lag_features=drop_lag_features,
+        target_mode=target_mode,
+        baseline_fn=baseline_fn,
     )
-    X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
     y = np.log(sales_train.Revenue.values)
     if target_mode == "residual":
         baseline = _baseline_prediction_array(
@@ -443,6 +636,9 @@ def train_xgboost_aux(
         y = y[valid] - np.log(np.clip(baseline[valid], 1e-6, None))
     elif target_mode != "direct":
         raise ValueError(f"Unsupported XGBoost target_mode: {target_mode}")
+    sample_weight = _outlier_sample_weights(sales_train) if outlier_downweight else None
+    if target_mode == "residual" and sample_weight is not None:
+        sample_weight = sample_weight[valid]
     model_params = dict(XGBOOST_AUX_PARAMS)
     if params is not None:
         model_params.update(params)
@@ -450,7 +646,7 @@ def train_xgboost_aux(
         **model_params,
         random_state=random_state,
     )
-    model.fit(X, y)
+    model.fit(X, y, sample_weight=sample_weight)
     return model, list(X.columns)
 
 
@@ -466,14 +662,16 @@ def predict_xgboost_aux(
     target_mode: str = "direct",
     baseline_fn: Callable[[pd.Series, pd.DataFrame, pd.Timestamp], np.ndarray] | None = seasonal_residual_baseline,
 ) -> np.ndarray:
-    X = _align_aux_prediction_matrix(
+    X = _align_xgboost_aux_prediction_matrix(
         val_dates,
         sales_train,
         as_of,
         feature_order,
         selected_aux_features=selected_aux_features,
+        drop_lag_features=drop_lag_features,
+        target_mode=target_mode,
+        baseline_fn=baseline_fn,
     )
-    X = _filter_xgboost_feature_matrix(X, drop_lag_features=drop_lag_features)
     pred_log = model.predict(X)
     if target_mode == "direct":
         return np.exp(pred_log)

@@ -10,8 +10,12 @@ def _safe_mean(*arrays: np.ndarray) -> np.ndarray:
     out = np.full(total.shape, np.nan, dtype=float)
     np.divide(total, valid, out=out, where=valid > 0)
     return out
-
-
+def _safe_divide(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    num = np.asarray(numerator, dtype=float)
+    den = np.asarray(denominator, dtype=float)
+    out = np.full(num.shape, np.nan, dtype=float)
+    np.divide(num, den, out=out, where=np.isfinite(den) & (np.abs(den) > 1e-9))
+    return out
 def _calendar_year_back(
     target_dates: pd.Series, series: pd.Series, years: int
 ) -> np.ndarray:
@@ -58,7 +62,7 @@ def seasonal_naive_growth_adjusted(
     return preds
 
 
-def _seasonal_lookup_level_adjusted(
+def seasonal_lookup_level_adjusted(
     target_dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
 ) -> np.ndarray:
     hist = sales[sales.Date <= as_of].copy()
@@ -90,17 +94,67 @@ def _seasonal_lookup_level_adjusted(
     out["prediction"] = out["prediction"].fillna(fallback)
     return out["prediction"].to_numpy(dtype=float)
 
+_seasonal_lookup_level_adjusted = seasonal_lookup_level_adjusted
+
+def seasonal_residual_baseline_components(
+    target_dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
+) -> pd.DataFrame:
+    mean_2y = np.asarray(seasonal_naive_mean_2y(target_dates, sales, as_of), dtype=float)
+    growth = np.asarray(seasonal_naive_growth_adjusted(target_dates, sales, as_of), dtype=float)
+    lookup = np.asarray(seasonal_lookup_level_adjusted(target_dates, sales, as_of), dtype=float)
+
+    anchor = np.asarray(mean_2y, dtype=float)
+    anchor = np.where(np.isfinite(anchor), anchor, lookup)
+    anchor = np.where(np.isfinite(anchor) & (anchor > 0), anchor, np.nan)
+    if np.isnan(anchor).any():
+        safe_fill = np.nanmedian(lookup) if np.isfinite(lookup).any() else 1.0
+        anchor = np.where(np.isnan(anchor), safe_fill, anchor)
+
+    consensus = _safe_mean(mean_2y, growth, lookup)
+    consensus = np.where(np.isfinite(consensus) & (consensus > 0), consensus, anchor)
+
+    component_stack = np.vstack([mean_2y, growth, lookup]).astype(float)
+    component_max = np.nanmax(component_stack, axis=0)
+    component_min = np.nanmin(component_stack, axis=0)
+    spread = _safe_divide(component_max - component_min, consensus)
+
+    df = pd.DataFrame({
+        "baseline_mean2y": mean_2y,
+        "baseline_growth": growth,
+        "baseline_lookup": lookup,
+        "baseline_anchor": anchor,
+        "baseline_consensus": consensus,
+        "baseline_spread": spread,
+    })
+    for col in [
+        "baseline_mean2y",
+        "baseline_growth",
+        "baseline_lookup",
+        "baseline_anchor",
+        "baseline_consensus",
+    ]:
+        df[f"log_{col}"] = np.log(np.maximum(df[col].astype(float), 1.0))
+
+    pairs = [
+        ("mean2y", mean_2y, "lookup", lookup),
+        ("growth", growth, "lookup", lookup),
+        ("mean2y", mean_2y, "growth", growth),
+        ("anchor", anchor, "consensus", consensus),
+    ]
+    for left_name, left, right_name, right in pairs:
+        df[f"gap_{left_name}_vs_{right_name}"] = left - right
+        df[f"ratio_{left_name}_vs_{right_name}"] = _safe_divide(left, right)
+
+    for col in [c for c in df.columns if c.startswith("ratio_")]:
+        df[col] = df[col].clip(lower=0.1, upper=10.0)
+
+    return df.replace([np.inf, -np.inf], np.nan)
+
 
 def seasonal_residual_baseline(
     target_dates: pd.Series, sales: pd.DataFrame, as_of: pd.Timestamp
 ) -> np.ndarray:
-    mean_2y = seasonal_naive_mean_2y(target_dates, sales, as_of)
-    lookup = _seasonal_lookup_level_adjusted(target_dates, sales, as_of)
+    return seasonal_residual_baseline_components(
+        target_dates, sales, as_of
+    )["baseline_anchor"].to_numpy(dtype=float)
 
-    preds = np.asarray(mean_2y, dtype=float)
-    preds = np.where(np.isfinite(preds), preds, lookup)
-    preds = np.where(np.isfinite(preds) & (preds > 0), preds, np.nan)
-    if np.isnan(preds).any():
-        safe_fill = np.nanmedian(lookup) if np.isfinite(lookup).any() else 1.0
-        preds = np.where(np.isnan(preds), safe_fill, preds)
-    return preds

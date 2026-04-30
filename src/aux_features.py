@@ -10,6 +10,44 @@ import pandas as pd
 ROOT = Path(__file__).parent.parent
 DATA_DIR = ROOT / "data"
 
+COMMERCIAL_SEASONALITY_FEATURES = [
+    "year_end_inventory_clearance_window",
+    "promo_seasonality_score",
+    "historical_sessions_seasonality_score",
+    "historical_conversion_seasonality_score",
+    "streetwear_low_margin_exposure_seasonality",
+    "odd_year_q4_pressure_flag",
+    "days_to_tet",
+    "pre_tet_window",
+    "post_tet_window",
+]
+
+_AUX_BATCH_FLAGS: dict[str, bool] = {
+    "batch1": True,
+    "batch2": True,
+    "batch3": True,
+}
+
+
+def configure_aux_batches(
+    *,
+    enable_batch1: bool = True,
+    enable_batch2: bool = True,
+    enable_batch3: bool = True,
+    clear_cache: bool = True,
+) -> dict[str, bool]:
+    """Configure optional auxiliary feature batches for ablation runs."""
+    _AUX_BATCH_FLAGS["batch1"] = bool(enable_batch1)
+    _AUX_BATCH_FLAGS["batch2"] = bool(enable_batch2)
+    _AUX_BATCH_FLAGS["batch3"] = bool(enable_batch3)
+    if clear_cache:
+        build_aux_daily.cache_clear()
+    return dict(_AUX_BATCH_FLAGS)
+
+
+def get_aux_batch_flags() -> dict[str, bool]:
+    return dict(_AUX_BATCH_FLAGS)
+
 
 def _clean_name(value: object) -> str:
     text = str(value).lower().strip()
@@ -80,24 +118,39 @@ def _fit_trend_seasonal_model(
     }
 
 
+
+def _safe_ratio_feature(
+    numerator: np.ndarray,
+    denominator: np.ndarray,
+    *,
+    neutral: float = 1.0,
+    lower: float = 0.1,
+    upper: float = 5.0,
+) -> np.ndarray:
+    num = np.asarray(numerator, dtype=float)
+    den = np.asarray(denominator, dtype=float)
+    out = np.full(num.shape, neutral, dtype=float)
+    np.divide(num, den, out=out, where=np.isfinite(den) & (np.abs(den) > 1e-9))
+    out = np.where(np.isfinite(out), out, neutral)
+    return np.clip(out, lower, upper)
+
+
 def _project_trend_seasonal(
     model: dict | None,
     target_dates: pd.DatetimeIndex,
 ) -> pd.DataFrame:
-    """Project values for target_dates from a fitted trend+seasonal model.
-
-    Returns three columns:
-    - trend: pure linear extrapolation
-    - trend_month: trend + monthly seasonal adjustment
-    - trend_month_dow: trend + monthly + day-of-week adjustment
-    """
     n = len(target_dates)
+    columns = [
+        "trend",
+        "trend_month",
+        "trend_month_dow",
+        "month_lift",
+        "dow_lift",
+        "month_ratio",
+        "dow_ratio",
+    ]
     if model is None:
-        return pd.DataFrame({
-            "trend": np.full(n, np.nan),
-            "trend_month": np.full(n, np.nan),
-            "trend_month_dow": np.full(n, np.nan),
-        })
+        return pd.DataFrame({c: np.full(n, np.nan) for c in columns})
 
     days = (target_dates - model["origin"]).days.values.astype(float)
     trend = model["slope"] * days + model["intercept"]
@@ -109,17 +162,110 @@ def _project_trend_seasonal(
         model["dow_seasonal"].get(d, 0.0) for d in target_dates.dayofweek
     ])
 
+    trend_month = trend + month_adj
+    trend_month_dow = trend_month + dow_adj
+    month_lift = trend_month - trend
+    dow_lift = trend_month_dow - trend_month
+
     return pd.DataFrame({
         "trend": trend,
-        "trend_month": trend + month_adj,
-        "trend_month_dow": trend + month_adj + dow_adj,
+        "trend_month": trend_month,
+        "trend_month_dow": trend_month_dow,
+        "month_lift": month_lift,
+        "dow_lift": dow_lift,
+        "month_ratio": _safe_ratio_feature(trend_month, trend),
+        "dow_ratio": _safe_ratio_feature(trend_month_dow, trend_month),
     })
+
+def _seasonal_ratio_score(
+    aux: pd.DataFrame,
+    column: str,
+    target_dates: pd.Series,
+    as_of: pd.Timestamp,
+) -> np.ndarray:
+    """Return a forecast-safe seasonal ratio for one historical auxiliary column.
+
+    A score of 1.0 means "normal for this metric"; values above/below 1.0 mean
+    that the target date historically sits in a higher/lower seasonal pocket.
+    Only rows on or before `as_of` are used.
+    """
+    dates = pd.DatetimeIndex(pd.to_datetime(target_dates))
+    if column not in aux.columns:
+        return np.zeros(len(dates), dtype=float)
+
+    hist = (
+        aux.loc[aux.index <= pd.Timestamp(as_of), column]
+        .astype(float)
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+    if len(hist) < 30:
+        return np.zeros(len(dates), dtype=float)
+
+    recent_cutoff = pd.Timestamp(as_of) - pd.DateOffset(years=4)
+    base = hist.loc[hist.index >= recent_cutoff]
+    if len(base) < 60:
+        base = hist
+
+    frame = pd.DataFrame({"value": base})
+    frame["month"] = frame.index.month
+    frame["dow"] = frame.index.dayofweek
+    month_mean = frame.groupby("month").value.mean()
+    month_dow_mean = frame.groupby(["month", "dow"]).value.mean()
+    overall = float(frame.value.mean())
+
+    if not np.isfinite(overall) or abs(overall) < 1e-9:
+        return np.zeros(len(dates), dtype=float)
+
+    out = pd.DataFrame({"Date": dates})
+    out["month"] = out.Date.dt.month
+    out["dow"] = out.Date.dt.dayofweek
+    seasonal = out.apply(
+        lambda r: month_dow_mean.get((r.month, r.dow), np.nan), axis=1
+    )
+    seasonal = seasonal.fillna(out.month.map(month_mean)).fillna(overall)
+    score = seasonal.to_numpy(dtype=float) / overall
+    return np.where(np.isfinite(score), score, 0.0)
+
+
+def build_commercial_seasonality_features(
+    target_dates: pd.Series,
+    as_of: pd.Timestamp,
+    *,
+    aux_daily: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Build business-prior seasonality scores for the forecast horizon.
+
+    These features intentionally use historical seasonality/projection only.
+    They do not read future traffic, promotion, order, or inventory rows.
+    Calendar flags such as Tet and odd-year Q4 are created in features.py.
+    """
+    aux = build_aux_daily() if aux_daily is None else aux_daily
+    return pd.DataFrame(
+        {
+            "promo_seasonality_score": _seasonal_ratio_score(
+                aux, "active_promos", target_dates, as_of
+            ),
+            "historical_sessions_seasonality_score": _seasonal_ratio_score(
+                aux, "sessions", target_dates, as_of
+            ),
+            "historical_conversion_seasonality_score": _seasonal_ratio_score(
+                aux, "conversion_order_per_session", target_dates, as_of
+            ),
+            "streetwear_low_margin_exposure_seasonality": _seasonal_ratio_score(
+                aux, "streetwear_low_margin_exposure", target_dates, as_of
+            ),
+        }
+    )
 
 
 @lru_cache(maxsize=1)
 def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
     """Build one daily dataframe from all non-sales source tables."""
     data_dir = Path(data_dir)
+    enable_batch1 = bool(_AUX_BATCH_FLAGS.get("batch1", True))
+    enable_batch2 = bool(_AUX_BATCH_FLAGS.get("batch2", True))
+    enable_batch3 = bool(_AUX_BATCH_FLAGS.get("batch3", True))
 
     sales = pd.read_csv(data_dir / "sales.csv", parse_dates=["Date"])
     orders = pd.read_csv(data_dir / "orders.csv", parse_dates=["order_date"])
@@ -166,7 +312,7 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
         int
     )
     orders2["cod_payment"] = (orders2.payment_method == "cod").astype(int)
-    for source in ["paid_search", "organic_search", "email", "social_media"]:
+    for source in ["paid_search", "organic_search", "email_campaign", "social_media"]:
         orders2[f"source_{source}"] = (orders2.order_source == source).astype(int)
 
     order_agg = orders2.groupby("order_date").agg(
@@ -181,10 +327,30 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
         cod_share=("cod_payment", "mean"),
         paid_search_share=("source_paid_search", "mean"),
         organic_search_share=("source_organic_search", "mean"),
-        email_share=("source_email", "mean"),
+        email_campaign_share=("source_email_campaign", "mean"),
         social_media_share=("source_social_media", "mean"),
     )
     aux = aux.join(order_agg, how="left")
+
+    if enable_batch3:
+        # Trust / retention: repeat vs first-time order share by day.
+        orders_repeat = orders2.sort_values(
+            ["customer_id", "order_date", "order_id"]
+        ).copy()
+        orders_repeat["customer_prior_orders"] = orders_repeat.groupby(
+            "customer_id"
+        ).cumcount()
+        orders_repeat["repeat_order"] = (
+            orders_repeat["customer_prior_orders"] > 0
+        ).astype(int)
+        orders_repeat["first_time_order"] = (
+            orders_repeat["customer_prior_orders"] == 0
+        ).astype(int)
+        repeat_agg = orders_repeat.groupby("order_date").agg(
+            repeat_order_share=("repeat_order", "mean"),
+            first_time_order_share=("first_time_order", "mean"),
+        )
+        aux = aux.join(repeat_agg, how="left")
 
     items = order_items.merge(
         orders[["order_id", "order_date", "zip"]], on="order_id", how="left"
@@ -193,8 +359,10 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
         on="product_id",
         how="left",
     )
-    items["gross_sales"] = items.quantity * items.unit_price
-    items["net_item_sales"] = items.gross_sales - items.discount_amount
+    items["realized_item_sales"] = items.quantity * items.unit_price
+    items["discount_amount"] = items.discount_amount.fillna(0.0)
+    items["net_item_sales"] = items["realized_item_sales"]
+    items["gross_sales"] = items["realized_item_sales"] + items["discount_amount"]
     items["discount_rate"] = np.where(
         items.gross_sales > 0, items.discount_amount / items.gross_sales, 0.0
     )
@@ -202,11 +370,54 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
     items["product_margin_rate"] = np.where(
         items.price > 0, (items.price - items.cogs) / items.price, np.nan
     )
+    product_margin_median = float(
+        products.assign(
+            catalog_margin=np.where(
+                products.price > 0, (products.price - products.cogs) / products.price, np.nan
+            )
+        )["catalog_margin"].median()
+    )
+    items["low_margin_product"] = (
+        items["product_margin_rate"] < product_margin_median
+    ).astype(int)
+    items["is_streetwear"] = (
+        items.category.astype(str).str.strip().str.lower().eq("streetwear")
+    ).astype(int)
+    items["promo_net_item_sales"] = np.where(
+        items.promo_item.astype(bool), items.net_item_sales, 0.0
+    )
+    items["low_margin_net_sales"] = np.where(
+        items.low_margin_product.astype(bool), items.net_item_sales, 0.0
+    )
+    items["streetwear_net_sales"] = np.where(
+        items.is_streetwear.astype(bool), items.net_item_sales, 0.0
+    )
+    items["promo_low_margin_net_sales"] = np.where(
+        items.promo_item.astype(bool) & items.low_margin_product.astype(bool),
+        items.net_item_sales,
+        0.0,
+    )
+    items["promo_streetwear_net_sales"] = np.where(
+        items.promo_item.astype(bool) & items.is_streetwear.astype(bool),
+        items.net_item_sales,
+        0.0,
+    )
+    items["streetwear_low_margin_sales"] = np.where(
+        items.is_streetwear.astype(bool) & items.low_margin_product.astype(bool),
+        items.net_item_sales,
+        0.0,
+    )
     item_agg = items.groupby("order_date").agg(
         units=("quantity", "sum"),
         gross_sales=("gross_sales", "sum"),
         net_item_sales=("net_item_sales", "sum"),
+        promo_net_item_sales=("promo_net_item_sales", "sum"),
+        low_margin_net_sales=("low_margin_net_sales", "sum"),
+        streetwear_net_sales=("streetwear_net_sales", "sum"),
+        promo_low_margin_net_sales=("promo_low_margin_net_sales", "sum"),
+        promo_streetwear_net_sales=("promo_streetwear_net_sales", "sum"),
         discount_amount=("discount_amount", "sum"),
+        streetwear_low_margin_sales=("streetwear_low_margin_sales", "sum"),
         avg_unit_price=("unit_price", "mean"),
         avg_discount_rate=("discount_rate", "mean"),
         promo_item_share=("promo_item", "mean"),
@@ -268,10 +479,16 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
     )
     aux = aux.join(ret_agg, how="left")
 
-    rev_agg = reviews.groupby("review_date").agg(
-        review_rows=("order_id", "size"),
-        avg_rating=("rating", "mean"),
-    )
+    rev_agg_dict: dict[str, tuple[str, object]] = {
+        "review_rows": ("order_id", "size"),
+        "avg_rating": ("rating", "mean"),
+    }
+    if enable_batch3:
+        rev_agg_dict["low_rating_share"] = (
+            "rating",
+            lambda s: float((s <= 2).mean()),
+        )
+    rev_agg = reviews.groupby("review_date").agg(**rev_agg_dict)
     aux = aux.join(rev_agg, how="left")
 
     traffic_agg = traffic.groupby("date").agg(
@@ -282,6 +499,21 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
         avg_session_duration_sec=("avg_session_duration_sec", "mean"),
     )
     aux = aux.join(traffic_agg, how="left")
+    traffic_src = traffic.copy()
+    traffic_src["traffic_source_clean"] = (
+        traffic_src["traffic_source"].astype(str).str.strip().str.lower()
+    )
+    traffic_src_daily = traffic_src.pivot_table(
+        index="date",
+        columns="traffic_source_clean",
+        values="sessions",
+        aggfunc="sum",
+    )
+    if len(traffic_src_daily):
+        traffic_src_daily.columns = [
+            f"sessions_source_{_clean_name(c)}" for c in traffic_src_daily.columns
+        ]
+        aux = aux.join(traffic_src_daily, how="left")
 
     promo_records = []
     for _, row in promos.iterrows():
@@ -333,7 +565,13 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
         "units",
         "gross_sales",
         "net_item_sales",
+        "promo_net_item_sales",
+        "low_margin_net_sales",
+        "streetwear_net_sales",
+        "promo_low_margin_net_sales",
+        "promo_streetwear_net_sales",
         "discount_amount",
+        "streetwear_low_margin_sales",
         "distinct_products",
         "payment_value",
         "shipments",
@@ -368,6 +606,105 @@ def build_aux_daily(data_dir: str | Path = DATA_DIR) -> pd.DataFrame:
     aux["conversion_order_per_session"] = aux.order_count / np.maximum(aux.sessions, 1.0)
     aux["refund_per_order"] = aux.refund_amount / np.maximum(aux.order_count, 1.0)
     aux["return_qty_per_order"] = aux.return_qty / np.maximum(aux.order_count, 1.0)
+    aux["streetwear_low_margin_exposure"] = (
+        aux.streetwear_low_margin_sales / np.maximum(aux.net_item_sales, 1.0)
+    )
+    if enable_batch1:
+        aux["promo_net_sales_share"] = (
+            aux.promo_net_item_sales / np.maximum(aux.net_item_sales, 1.0)
+        )
+        aux["promo_discount_to_gross_sales"] = (
+            aux.discount_amount / np.maximum(aux.gross_sales, 1.0)
+        )
+        aux["full_price_sales_share"] = (
+            1.0 - aux["promo_net_sales_share"]
+        ).clip(lower=0.0, upper=1.0)
+        aux["low_margin_sales_share"] = (
+            aux.low_margin_net_sales / np.maximum(aux.net_item_sales, 1.0)
+        )
+        aux["streetwear_sales_share"] = (
+            aux.streetwear_net_sales / np.maximum(aux.net_item_sales, 1.0)
+        )
+        aux["streetwear_low_margin_sales_share"] = (
+            aux.streetwear_low_margin_sales / np.maximum(aux.net_item_sales, 1.0)
+        )
+        aux["promo_low_margin_sales_share"] = (
+            aux.promo_low_margin_net_sales / np.maximum(aux.net_item_sales, 1.0)
+        )
+        aux["promo_streetwear_sales_share"] = (
+            aux.promo_streetwear_net_sales / np.maximum(aux.net_item_sales, 1.0)
+        )
+        aux["promo_margin_dilution_score"] = (
+            aux["promo_net_sales_share"] * aux["low_margin_sales_share"]
+        )
+        aux["streetwear_promo_pressure"] = (
+            aux["promo_net_sales_share"] * aux["streetwear_sales_share"]
+        )
+        aux["streetwear_low_margin_promo_pressure"] = (
+            aux["promo_net_sales_share"] * aux["streetwear_low_margin_sales_share"]
+        )
+
+    if enable_batch2:
+        # Traffic quality features from session-source mix.
+        for src_col in [c for c in aux.columns if c.startswith("sessions_source_")]:
+            aux[src_col] = aux[src_col].fillna(0.0)
+        sess_total = np.maximum(aux.sessions.astype(float), 1.0)
+        organic_src = (
+            aux["sessions_source_organic_search"]
+            if "sessions_source_organic_search" in aux.columns
+            else 0.0
+        )
+        paid_src = (
+            aux["sessions_source_paid_search"]
+            if "sessions_source_paid_search" in aux.columns
+            else 0.0
+        )
+        social_src = (
+            aux["sessions_source_social_media"]
+            if "sessions_source_social_media" in aux.columns
+            else 0.0
+        )
+        email_src = (
+            aux["sessions_source_email_campaign"]
+            if "sessions_source_email_campaign" in aux.columns
+            else 0.0
+        )
+        direct_src = (
+            aux["sessions_source_direct"]
+            if "sessions_source_direct" in aux.columns
+            else 0.0
+        )
+        aux["organic_search_session_share"] = (organic_src / sess_total).clip(0.0, 1.0)
+        aux["paid_search_session_share"] = (paid_src / sess_total).clip(0.0, 1.0)
+        aux["social_media_session_share"] = (social_src / sess_total).clip(0.0, 1.0)
+        aux["email_campaign_session_share"] = (email_src / sess_total).clip(0.0, 1.0)
+        aux["direct_session_share"] = (direct_src / sess_total).clip(0.0, 1.0)
+        aux["paid_traffic_share"] = (
+            aux["paid_search_session_share"] + aux["social_media_session_share"]
+        ).clip(0.0, 1.0)
+        aux["non_direct_traffic_share"] = (
+            1.0 - aux["direct_session_share"]
+        ).clip(0.0, 1.0)
+        conv_gap = (1.0 - aux["conversion_order_per_session"]).clip(
+            lower=0.0, upper=2.0
+        )
+        aux["organic_conversion_mismatch"] = (
+            aux["organic_search_session_share"] * conv_gap
+        )
+        aux["paid_low_intent_pressure"] = aux["paid_traffic_share"] * conv_gap
+        aux["traffic_quality_drag"] = (
+            aux["bounce_rate"] * aux["non_direct_traffic_share"]
+        )
+
+    if enable_batch3:
+        aux["repeat_order_share"] = aux["repeat_order_share"].fillna(0.0)
+        aux["first_time_order_share"] = aux["first_time_order_share"].fillna(0.0)
+        aux["low_rating_share"] = aux["low_rating_share"].fillna(0.0)
+        aux["trust_drag_score"] = (
+            aux["low_rating_share"]
+            + aux["refund_per_order"]
+            + aux["return_qty_per_order"]
+        )
 
     return aux.sort_index()
 
@@ -390,12 +727,25 @@ def aux_feature_groups(aux_daily: pd.DataFrame | None = None) -> dict[str, list[
     marketing_web = [
         "avg_discount_rate",
         "promo_item_share",
+        "promo_net_sales_share",
+        "promo_discount_to_gross_sales",
+        "full_price_sales_share",
         "active_promos",
         "avg_promo_discount_value",
         "paid_search_share",
         "organic_search_share",
-        "email_share",
+        "email_campaign_share",
         "social_media_share",
+        "organic_search_session_share",
+        "paid_search_session_share",
+        "social_media_session_share",
+        "email_campaign_session_share",
+        "direct_session_share",
+        "paid_traffic_share",
+        "non_direct_traffic_share",
+        "organic_conversion_mismatch",
+        "paid_low_intent_pressure",
+        "traffic_quality_drag",
         "bounce_rate",
         "avg_session_duration_sec",
         "conversion_order_per_session",
@@ -405,6 +755,15 @@ def aux_feature_groups(aux_daily: pd.DataFrame | None = None) -> dict[str, list[
         "avg_unit_price",
         "units_per_order",
         "avg_product_margin_rate",
+        "streetwear_low_margin_exposure",
+        "low_margin_sales_share",
+        "streetwear_sales_share",
+        "streetwear_low_margin_sales_share",
+        "promo_low_margin_sales_share",
+        "promo_streetwear_sales_share",
+        "promo_margin_dilution_score",
+        "streetwear_promo_pressure",
+        "streetwear_low_margin_promo_pressure",
         "mobile_share",
         "desktop_share",
         "credit_card_share",
@@ -422,6 +781,10 @@ def aux_feature_groups(aux_daily: pd.DataFrame | None = None) -> dict[str, list[
         "refund_per_order",
         "review_rows",
         "avg_rating",
+        "low_rating_share",
+        "repeat_order_share",
+        "first_time_order_share",
+        "trust_drag_score",
         "stockout_ratio",
         "overstock_ratio",
         "reorder_ratio",
@@ -434,12 +797,18 @@ def aux_feature_groups(aux_daily: pd.DataFrame | None = None) -> dict[str, list[
         "marketing_web": marketing_web,
         "mix_geo_product": mix_geo_product,
         "ops_quality_inventory": ops_quality_inventory,
+        "commercial_seasonality_raw": [
+            "active_promos",
+            "sessions",
+            "conversion_order_per_session",
+            "streetwear_low_margin_exposure",
+        ],
     }
-    groups["all_aux"] = [
+    groups["all_aux"] = list(dict.fromkeys(
         c
         for group_cols in groups.values()
         for c in group_cols
-    ]
+    ))
     return {
         name: [c for c in cols if c in aux.columns and aux[c].notna().any()]
         for name, cols in groups.items()

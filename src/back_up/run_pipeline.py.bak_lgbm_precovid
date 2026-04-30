@@ -765,27 +765,23 @@ def _run_final_precovid_anchor(
     regime_profile: str,
     baseline_mode: str,
     submission_scale: float,
-    model_kind: str,
 ) -> tuple[Path, Path]:
     tag_clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", submission_tag.strip()) if submission_tag else ""
     suffix = f"_{tag_clean}" if tag_clean else ""
-    model_tag = "xgboost" if model_kind == "xgb" else "lightgbm"
-    profile_tag = f"{model_tag}_{feature_set}_{regime_profile}_{baseline_mode}"
-    artifact_prefix = f"{model_tag}_precovid_anchor_{feature_set}_{regime_profile}_{baseline_mode}{suffix}"
+    profile_tag = f"{feature_set}_{regime_profile}_{baseline_mode}"
+    artifact_prefix = f"xgboost_precovid_anchor_{profile_tag}{suffix}"
     paths = xgb_artifact_paths(artifact_prefix)
 
     cfg = PreCovidAnchorConfig(
         feature_set=feature_set,
         regime_profile=regime_profile,
         baseline_mode=baseline_mode,
-        model_kind=model_kind,
         random_state=42,
     )
     print(
         "Using final pre-Covid anchor mode: "
-        f"model_kind={model_kind}, feature_set={feature_set}, "
-        f"regime_profile={regime_profile}, baseline_mode={baseline_mode}, "
-        f"submission_scale={submission_scale:.4f}"
+        f"feature_set={feature_set}, regime_profile={regime_profile}, "
+        f"baseline_mode={baseline_mode}, submission_scale={submission_scale:.4f}"
     )
 
     xgb_oof = collect_precovid_anchor_oof_predictions(
@@ -823,7 +819,7 @@ def _run_final_precovid_anchor(
         xgb_calibrator=calibration_result.calibrator,
         xgb_drop_lag_features=True,
         xgb_target_mode="residual",
-        xgb_model_name=f"{model_tag}_precovid_anchor_{feature_set}_{regime_profile}_{baseline_mode}",
+        xgb_model_name=f"xgboost_precovid_anchor_{profile_tag}",
         include_all_models=False,
     )
     cv_weighted = weighted_cv_summary(cv, folds=folds)
@@ -842,8 +838,8 @@ def _run_final_precovid_anchor(
     pred_cal = calibration_result.calibrator.predict(pred_raw)
     pred_scaled = np.asarray(pred_cal, dtype=float) * float(submission_scale)
 
-    cal_path = SUB_DIR / f"submission_{model_tag}_precovid_anchor_calibrated{suffix}.csv"
-    scaled_path = SUB_DIR / f"submission_{model_tag}_precovid_anchor_scaled{suffix}.csv"
+    cal_path = SUB_DIR / f"submission_xgboost_precovid_anchor_calibrated{suffix}.csv"
+    scaled_path = SUB_DIR / f"submission_xgboost_precovid_anchor_scaled{suffix}.csv"
 
     out_cal = sample_sub.copy()
     out_cal["Revenue"] = pred_cal
@@ -855,7 +851,6 @@ def _run_final_precovid_anchor(
 
     meta = {
         "mode": "final_precovid_anchor",
-        "model_kind": model_kind,
         "cv_profile": cv_profile,
         "feature_set": feature_set,
         "regime_profile": regime_profile,
@@ -986,12 +981,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Run the production pre-Covid anchor refined5 pipeline and write final calibrated/scaled submissions.",
     )
     parser.add_argument(
-        "--precovid-model-kind",
-        choices=["xgb", "lgbm"],
-        default="xgb",
-        help="Learner used by --final-precovid-anchor: XGBoost or LightGBM.",
-    )
-    parser.add_argument(
         "--precovid-feature-set",
         choices=["anchor", "anchor_long", "anchor_gap"],
         default="anchor_gap",
@@ -1088,7 +1077,6 @@ def main() -> None:
             regime_profile=str(args.regime_profile),
             baseline_mode=str(args.baseline_mode),
             submission_scale=float(args.submission_scale),
-            model_kind=str(args.precovid_model_kind),
         )
         print(f"wrote {cal_path}")
         print(f"wrote {scaled_path}")
