@@ -1,0 +1,3 @@
+model,MAE,RMSE,R2,MAPE
+xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default_calibrated,569488.8644667304,807299.3994586573,0.748784322060094,0.21661924332943353
+xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default,663254.2282579471,932230.0133541983,0.6643386176823617,0.2228336808667147

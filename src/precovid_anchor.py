@@ -276,7 +276,7 @@ def _regime_weights(
         return np.ones(len(years), dtype=float)
 
     profiles = {
-        "aggressive_w20_05": (0.5, 2.0, 0.5),
+        "aggressive_w20_05": (0.5, 2.2, 0.5),
         "balanced_recovery": (0.7, 1.4, 1.0),
         "strong_recovery": (0.6, 1.7, 0.9),
     }

@@ -1,0 +1,26 @@
+{
+  "mode": "final_precovid_anchor",
+  "model_kind": "xgb",
+  "cv_profile": "late_priority",
+  "feature_set": "anchor_gap",
+  "regime_profile": "aggressive_w20_05",
+  "baseline_mode": "default",
+  "submission_scale": 1.15,
+  "refined5_params": {
+    "objective": "reg:squarederror",
+    "learning_rate": 0.025,
+    "n_estimators": 650,
+    "max_depth": 3,
+    "min_child_weight": 10.0,
+    "subsample": 0.8,
+    "colsample_bytree": 0.65,
+    "gamma": 0.1,
+    "reg_alpha": 1.0,
+    "reg_lambda": 10.0,
+    "tree_method": "hist",
+    "n_jobs": 1,
+    "verbosity": 0
+  },
+  "submission_calibrated": "C:\\Users\\Admin\\Documents\\VIN Datathon\\submissions\\submission_xgboost_precovid_anchor_calibrated_low_w2020_2022.csv",
+  "submission_scaled": "C:\\Users\\Admin\\Documents\\VIN Datathon\\submissions\\submission_xgboost_precovid_anchor_scaled_low_w2020_2022.csv"
+}
