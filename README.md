@@ -31,37 +31,42 @@ jupyter lab
 
 ## Project layout
 
-- `data/`: raw data files such as the CSV drop from the competition
-- `outputs/`: charts, exports, and intermediate artifacts
-- `submissions/`: generated submission files
-- `data.ipynb`: starter notebook for EDA and modeling
+- `data/`: competition input files such as `sales.csv` and `sample_submission.csv`
+- `notebooks/`: exploratory analysis and notebook-based modelling work
+- `src/`: forecasting pipeline, feature engineering, validation, calibration, and model code
+- `outputs/`: CV reports, calibration artifacts, and intermediate experiment outputs
+- `submissions/`: generated submission files for upload or comparison
+- `docs/`: modelling notes, experiment summaries, and report assets
+- `figures/`: charts exported from EDA and diagnostics
 - `archive/sql_mcq/`: archived SQL MCQ materials restored from the original repository
 
 ## Forecast Pipeline
 
-Run the end-to-end forecasting script with:
+Run the final pre-Covid anchor XGBoost pipeline from the repository root with:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.run_pipeline
+python src/run_pipeline.py --final-precovid-anchor --precovid-feature-set anchor_gap --regime-profile aggressive_w20_05 --baseline-mode default --submission-scale 1.05 --submission-tag anchor_gap_default_aggressive_w20_05_x105
 ```
 
-This now includes:
+This configuration builds the final `xgboost` pre-Covid anchor model with:
 
-- the existing baseline, hist-GBM, GBR, LightGBM, and MLP models
-- an `xgboost` top-aux feature pipeline
-- post-hoc calibration for the `xgboost` submission using out-of-fold predictions
+- `anchor_gap` pre-Covid anchor features
+- `aggressive_w20_05` regime weighting
+- the default residual anchor baseline
+- isotonic post-hoc calibration on out-of-fold predictions
+- a final global submission scaling factor of `1.05`
 
-To tune the `xgboost` model with Optuna before generating CV results and submission files:
+Key artifacts for this run:
 
-```powershell
-.\.venv\Scripts\python.exe -m src.run_pipeline --tune-xgboost --xgb-trials 40
-```
+- `outputs/xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default_anchor_gap_default_aggressive_w20_05_x105_oof_predictions.csv`
+- `outputs/xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default_anchor_gap_default_aggressive_w20_05_x105_oof_calibrated.csv`
+- `outputs/xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default_anchor_gap_default_aggressive_w20_05_x105_cv_results.csv`
+- `outputs/xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default_anchor_gap_default_aggressive_w20_05_x105_cv_weighted_summary.csv`
+- `outputs/xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default_anchor_gap_default_aggressive_w20_05_x105_calibration_summary.json`
+- `outputs/xgboost_precovid_anchor_anchor_gap_aggressive_w20_05_default_anchor_gap_default_aggressive_w20_05_x105_run_meta.json`
+- `submissions/submission_xgboost_precovid_anchor_calibrated_anchor_gap_default_aggressive_w20_05_x105.csv`
+- `submissions/submission_xgboost_precovid_anchor_scaled_anchor_gap_default_aggressive_w20_05_x105.csv`
 
-Key artifacts:
+Best submission currently tracked in this repository:
 
-- `outputs/xgboost_best_params.json`: cached best parameters from Optuna
-- `outputs/xgboost_optuna_trials.csv`: trial-level tuning results
-- `outputs/xgboost_oof_predictions.csv`: raw walk-forward predictions for calibration
-- `outputs/xgboost_oof_calibrated.csv`: calibrated out-of-fold predictions
-- `submissions/submission_xgboost_top_aux_calibrated.csv`: calibrated XGBoost submission
-- `submissions/submission.csv`: alias of the calibrated XGBoost submission
+- `submissions/submission_xgboost_precovid_anchor_scaled_anchor_gap_default_aggressive_w20_05_x105.csv`
