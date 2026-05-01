@@ -36,9 +36,6 @@ jupyter lab
 - `src/`: forecasting pipeline, feature engineering, validation, calibration, and model code
 - `outputs/`: CV reports, calibration artifacts, and intermediate experiment outputs
 - `submissions/`: generated submission files for upload or comparison
-- `docs/`: modelling notes, experiment summaries, and report assets
-- `figures/`: charts exported from EDA and diagnostics
-- `archive/sql_mcq/`: archived SQL MCQ materials restored from the original repository
 
 ## Forecast Pipeline
 
