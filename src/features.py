@@ -68,6 +68,7 @@ def _calendar_features(dates: pd.Series) -> pd.DataFrame:
     d["is_weekend"] = (d.dow >= 5).astype(int)
     d["is_month_start"] = d.Date.dt.is_month_start.astype(int)
     d["is_month_end"] = d.Date.dt.is_month_end.astype(int)
+    d["month_end_window"] = (d.Date.dt.days_in_month - d.day <= 3).astype(int)
 
     # cyclical encodings — k=1
     d["month_sin"] = np.sin(2 * np.pi * d.month / 12)
@@ -97,6 +98,8 @@ def _calendar_features(dates: pd.Series) -> pd.DataFrame:
     d["days_to_tet"] = d.Date.apply(_signed_days_to_tet)
     d["abs_days_to_tet"] = d.days_to_tet.abs()
     d["is_tet_week"] = (d.abs_days_to_tet <= 7).astype(int)
+    d["pre_tet_window"] = ((d.days_to_tet >= -21) & (d.days_to_tet < 0)).astype(int)
+    d["post_tet_window"] = ((d.days_to_tet > 0) & (d.days_to_tet <= 14)).astype(int)
 
     # Regime indicator: 2019+ is the "new-normal" level
     d["regime_recent"] = (d.year >= 2019).astype(int)
@@ -107,6 +110,12 @@ def _calendar_features(dates: pd.Series) -> pd.DataFrame:
     d["is_even_year"] = (d.year % 2 == 0).astype(int)
     d["is_aug_even"] = (d.is_even_year & (d.month == 8)).astype(int)
     d["is_aug_odd"] = ((1 - d.is_even_year) & (d.month == 8)).astype(int)
+    d["year_end_inventory_clearance_window"] = d.month.isin([8, 9, 10, 11]).astype(int)
+    d["promo_window_q4"] = d.month.isin([10, 11, 12]).astype(int)
+    d["promo_window_midyear"] = d.month.isin([5, 6, 7]).astype(int)
+    d["odd_year_q4_pressure_flag"] = (
+        ((d.year % 2 == 1) & d.month.isin([10, 11, 12]))
+    ).astype(int)
 
     # Time elapsed features
     _ORIGIN = pd.Timestamp("2012-07-04")
@@ -128,6 +137,12 @@ def _calendar_features(dates: pd.Series) -> pd.DataFrame:
     d["is_q2_recent"] = ((d.quarter == 2) & d.regime_recent.astype(bool)).astype(int)
     d["month_x_even_year"] = d.month * d.is_even_year
     d["tet_week_x_dow"] = d.is_tet_week * d.dow
+    d["month_end_x_q4_promo"] = d.month_end_window * d.promo_window_q4
+    d["tet_or_month_end_pressure"] = (
+        (d.pre_tet_window.astype(bool))
+        | (d.post_tet_window.astype(bool))
+        | (d.month_end_window.astype(bool))
+    ).astype(int)
 
     return d.drop(columns=["Date"])
 
@@ -143,11 +158,11 @@ def _long_lag_features(dates: pd.Series, sales: pd.DataFrame) -> pd.DataFrame:
     s = sales.set_index("Date").Revenue.sort_index()
     dates = pd.to_datetime(dates)
     out = pd.DataFrame(index=dates)
-    for lag in [365, 548, 730]:
+    for lag in [365, 548, 730, 1095]:
         out[f"rev_lag_{lag}"] = s.reindex(dates - pd.Timedelta(days=lag)).values
 
     # Log-safe versions (log1p so NaN-filled later won't crash)
-    for lag in [365, 548, 730]:
+    for lag in [365, 548, 730, 1095]:
         out[f"log_rev_lag_{lag}"] = np.log(np.maximum(out[f"rev_lag_{lag}"], 1.0))
 
     # Rolling means ending 365d ago (smooth version of lag365, still leakage-safe)
@@ -165,19 +180,22 @@ def _long_lag_features(dates: pd.Series, sales: pd.DataFrame) -> pd.DataFrame:
         out[f"rev_roll{window}_end_730d_ago"] = rolled[window].reindex(
             dates - pd.Timedelta(days=730)
         ).values
+        out[f"rev_roll{window}_end_1095d_ago"] = rolled[window].reindex(
+            dates - pd.Timedelta(days=1095)
+        ).values
 
     # EWMA at lag-safe anchor points (more weight on recent history than simple rolling)
     _ewm_cache: dict[int, pd.Series] = {}
     for span in [14, 30, 90]:
         _ewm_cache[span] = s.ewm(span=span, min_periods=max(5, span // 4)).mean()
     for span in [14, 30, 90]:
-        for lag in [365, 548, 730]:
+        for lag in [365, 548, 730, 1095]:
             out[f"rev_ewm{span}_end_{lag}d_ago"] = _ewm_cache[span].reindex(
                 dates - pd.Timedelta(days=lag)
             ).values
 
     # YoY growth ratio using roll30 at each anchor (helps model learn trend direction)
-    for lag_near, lag_far in [(365, 730), (548, 730)]:
+    for lag_near, lag_far in [(365, 730), (548, 730), (730, 1095)]:
         near = out[f"rev_roll30_end_{lag_near}d_ago"]
         far = out[f"rev_roll30_end_{lag_far}d_ago"].replace(0, np.nan)
         out[f"rev_roll30_yoy_ratio_{lag_near}vs{lag_far}"] = near / far

@@ -1,0 +1,22 @@
+[
+  "aux_conversion_order_per_session_trend_month_dow",
+  "aux_conversion_order_per_session_trend_month",
+  "aux_active_promos_trend",
+  "aux_avg_discount_rate_trend",
+  "aux_avg_installments_trend",
+  "aux_avg_order_value_trend",
+  "aux_avg_product_margin_rate_trend",
+  "aux_avg_promo_discount_value_trend",
+  "aux_avg_rating_trend",
+  "aux_avg_session_duration_sec_trend",
+  "aux_avg_unit_price_trend",
+  "aux_bounce_rate_trend",
+  "aux_cat_share_casual_trend",
+  "aux_cat_share_genz_trend",
+  "aux_cat_share_outdoor_trend",
+  "aux_cat_share_streetwear_trend",
+  "aux_cod_share_trend",
+  "aux_credit_card_share_trend",
+  "aux_delivered_status_share_trend",
+  "aux_desktop_share_trend"
+]

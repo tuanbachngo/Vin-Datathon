@@ -6,7 +6,10 @@ import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 
-from validation import metrics
+try:  # Package import when used from notebooks: from src.calibration import ...
+    from .validation import metrics
+except ImportError:  # Direct script-style import when src/ is on sys.path.
+    from validation import metrics
 
 
 @dataclass

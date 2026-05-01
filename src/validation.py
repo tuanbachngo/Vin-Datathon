@@ -11,6 +11,7 @@ class Fold:
     train_end: pd.Timestamp
     val_start: pd.Timestamp
     val_end: pd.Timestamp
+    weight: float = 1.0
 
     def mask_train(self, dates: pd.Series) -> pd.Series:
         return dates <= self.train_end
@@ -19,19 +20,31 @@ class Fold:
         return (dates >= self.val_start) & (dates <= self.val_end)
 
 
-def default_folds() -> list[Fold]:
-    """Three walk-forward folds shaped like the real test (18-month horizon).
+def default_folds(profile: str = "late_priority") -> list[Fold]:
+    """Walk-forward folds shaped like the hidden-test regime.
 
-    Each val window spans ~18 months ending on Dec-31 so August anomalies
-    are always inside validation.
+    Profiles:
+    - ``late_priority``: same three windows, but weighted toward late periods.
+    - ``legacy``: previous equal-weight behavior for back-compat checks.
     """
+    if profile == "legacy":
+        return [
+            Fold("fold1_2020H2-2021", pd.Timestamp("2020-06-30"),
+                 pd.Timestamp("2020-07-01"), pd.Timestamp("2021-12-31"), 1.0),
+            Fold("fold2_2021H2-2022", pd.Timestamp("2021-06-30"),
+                 pd.Timestamp("2021-07-01"), pd.Timestamp("2022-12-31"), 1.0),
+            Fold("fold3_test_proxy", pd.Timestamp("2021-12-31"),
+                 pd.Timestamp("2022-01-01"), pd.Timestamp("2022-12-31"), 1.0),
+        ]
+    if profile != "late_priority":
+        raise ValueError(f"Unsupported fold profile: {profile}")
     return [
         Fold("fold1_2020H2-2021", pd.Timestamp("2020-06-30"),
-             pd.Timestamp("2020-07-01"), pd.Timestamp("2021-12-31")),
+             pd.Timestamp("2020-07-01"), pd.Timestamp("2021-12-31"), 0.20),
         Fold("fold2_2021H2-2022", pd.Timestamp("2021-06-30"),
-             pd.Timestamp("2021-07-01"), pd.Timestamp("2022-12-31")),
+             pd.Timestamp("2021-07-01"), pd.Timestamp("2022-12-31"), 0.30),
         Fold("fold3_test_proxy", pd.Timestamp("2021-12-31"),
-             pd.Timestamp("2022-01-01"), pd.Timestamp("2022-12-31")),
+             pd.Timestamp("2022-01-01"), pd.Timestamp("2022-12-31"), 0.50),
     ]
 
 
