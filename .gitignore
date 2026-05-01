@@ -10,7 +10,6 @@ __pycache__/
 .DS_Store
 
 # Local data drops can get large; keep them out of git by default.
-data/
 docs/
 archive/
 figures/
